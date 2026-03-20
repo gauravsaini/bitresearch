@@ -14,7 +14,7 @@ To set up a new experiment, work with the user to:
    - `src/distributed/trainer.ts` — the file you modify. Training loop, optimizer, gradient compression, all-reduce.
    - `src/model/gpt.ts` — model architecture, forward pass, loss. You modify this for architecture changes.
    - `src/model/config.ts` — model hyperparameters (nLayer, nHead, nEmbd, vocabSize, sequenceLen).
-4. **Verify data exists**: Check that `public/data/` contains tokenized data shards. If not, tell the human to run the data preparation script.
+4. **Verify data exists**: Check that the configured parity bundle or shard location contains tokenized data. By default that means `/data/parity/manifest.json` or the legacy `/data/tokens.bin` alias. If exact BPB is expected, confirm the token-byte sidecar lives next to the data source. If not, tell the human to run the data preparation script and mirror the output into the browser-served bundle.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Establish baseline**: Run the experiment once as-is (no code changes) to record YOUR baseline on this hardware. Do NOT use baseline numbers from other platforms:
    ```

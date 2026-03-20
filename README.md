@@ -91,9 +91,16 @@ The bitresearch parity path is:
 pnpm run prepare:data
 ```
 
-This script uses `rustbpe-wasm` instead of the Python `rustbpe` binding, keeps the same split pattern and BOS packing behavior, and writes parity `.bin` shards to `~/.cache/autoresearch/bin/`.
+This script uses `rustbpe-wasm` instead of the Python `rustbpe` binding, keeps the same split pattern and BOS packing behavior, and writes parity `.bin` shards to `PREPARE_WASM_OUTPUT_DIR` (default `~/.cache/autoresearch/bin/`) plus tokenizer sidecar artifacts to `PREPARE_WASM_TOKENIZER_DIR` (default `~/.cache/autoresearch/tokenizer/`).
 
-The browser runtime still reads [public/data/tokens.bin](/Users/ektasaini/Desktop/bitresearch/public/data/tokens.bin); the prepare script is the Karpathy-aligned tokenizer path for regenerating and validating shard tokenization.
+After tokenization it also mirrors a browser-ready bundle into `public/data/`:
+
+- `public/data/parity/manifest.json` plus shard files under `public/data/parity/bin/`
+- `public/data/parity/tokenizer/tokenizer.json`
+- `public/data/parity/tokenizer/token_bytes.bin`
+- legacy aliases at `public/data/tokens.bin`, `public/data/token_bytes.bin`, and `public/data/tokenizer.json`
+
+The default P2P runtime now prefers `/data/parity/manifest.json`, loads the shard stream listed there, and auto-discovers token-byte sidecars for exact BPB. If you need a custom location, override it with `artifactBaseUrl`, `manifestUrl`, `dataUrl`, `documentsUrl`, or `tokenBytesUrl` query params in `p2p.html`.
 
 Before running it, place extracted `shard_*.txt` files under `~/.cache/autoresearch/text/`. If you only want a quick parity check on a subset, you can limit work with:
 
@@ -137,11 +144,11 @@ pnpm run dev:p2p
 
 | Karpathy's autoresearch | This project | Purpose |
 |---|---|---|
-| `prepare.py` (data + tokenizer) | `scripts/prepare_wasm.ts` | Rust/WASM parity prep path for Karpathy-style shard tokenization. |
+| `prepare.py` (data + tokenizer) | `scripts/prepare_wasm.ts` | Rust/WASM parity prep path for Karpathy-style shard tokenization, tokenizer sidecars, and browser bundle mirroring. |
 | `train.py` (training loop) | `src/distributed/trainer.ts` | Forward/backward, optimizer, all-reduce, loss scaling. 100% browser-based. |
 | `train.py` (GPT model) | `src/model/gpt.ts` | TFJS transformer: RoPE, RMSNorm, sliding window attention. |
-| `make_dataloader()` | `src/data/dataloader.ts` | `TokenDataLoader` streams batches from `tokens.bin`. |
-| `evaluate_bpb()` | `trainer.evaluateBpb()` | Held-out val split, forward-only, convert nats → bpb. |
+| `make_dataloader()` | `src/data/dataloader.ts` | `TokenDataLoader` consumes manifest-backed shard streams or legacy `tokens.bin` inputs. |
+| `evaluate_bpb()` | `trainer.evaluateBpb()` | Held-out val split, forward-only, convert nats → bpb with token-byte sidecar support when available. |
 | Hyperparams (top of `train.py`) | `src/model/config.ts` + trainer config in `p2p.html` | Model size, LR, batch size, time budget. |
 | `run.log` / `grep "^val_bpb:"` | Console output + `printSummary()` on stop | Structured summary for result extraction. |
 | `results.tsv` | `results.tsv` (untracked) | Same 5-column TSV format. |
@@ -157,6 +164,6 @@ This matches Karpathy's autoresearch protocol. Configure via:
 - **Time budget**: `--timeout 300` (5 min default in headless mode) or `--max-steps N`
 - **Model size**: Edit `src/model/config.ts` (`nLayer`, `nHead`, `nEmbd`, `vocabSize`)
 - **Hyperparams**: Edit trainer config in `p2p.html` or pass via URL params
-- **Data**: Tokens are pre-exported at `public/data/tokens.bin`.
+- **Data**: By default the browser runtime reads `/data/parity/manifest.json` and falls back to `/data/tokens.bin`. BPB uses a token-byte sidecar when one is available.
 
 For custom goals (e.g., reach a target loss, maximize throughput), edit the `onMetricsUpdate` callback in `p2p.html` or the `printSummary()` function.

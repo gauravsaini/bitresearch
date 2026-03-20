@@ -62,6 +62,22 @@
 
 **Files changed**: `scripts/prepare_wasm.ts`, `src/data/bestFitPacking.ts`, `src/data/dataloader.ts`, `src/model/config.ts`, `src/model/gpt.ts`, `src/distributed/trainer.ts`, `PLAN.md`
 
+### Feature — End-to-End Parity Artifact Wiring
+
+1. **Browser-served parity bundle**: Added `scripts/parity-artifacts.ts` and wired `scripts/prepare_wasm.ts` to mirror cached parity outputs into `public/data/parity/`, including shard bins, tokenizer sidecars, and a browser-readable `manifest.json`.
+
+2. **Legacy compatibility aliases**: The parity sync step now refreshes `public/data/tokens.bin`, `public/data/token_bytes.bin`, `public/data/tokenizer.json`, and `public/data/tokens_meta.json` so older code paths still open a meaningful default artifact.
+
+3. **Manifest-aware runtime**: `src/distributed/trainer.ts` now prefers `/data/parity/manifest.json`, resolves shard files from the manifest, loads them as one training stream, and discovers exact-BPB sidecars from manifest-aware tokenizer locations before falling back to older guesses.
+
+4. **Configurable P2P entrypoint**: `p2p.html` now exposes query-param hooks for `artifactBaseUrl`, `manifestUrl`, `dataUrl`, `documentsUrl`, `tokenBytesUrl`, `dataFormat`, `bosTokenId`, `documentBufferSize`, and `documentsAreBOSPrefixed`, while no-arg launches default to the parity bundle.
+
+5. **Reference validation hygiene**: Added `src/model/reference.ts` and `scripts/check_reference.ts`; `src/model/validate.ts` now reports stale or incomplete reference bundles clearly instead of attempting invalid parity checks against mismatched tensors.
+
+6. **Docs/tracking refresh**: Updated `README.md`, `program.md`, `PLAN.md`, and `TIMELINE.md` so the default data flow now matches the actual manifest-driven browser runtime.
+
+**Files changed**: `scripts/parity-artifacts.ts`, `scripts/prepare_wasm.ts`, `server/index.ts`, `src/distributed/trainer.ts`, `p2p.html`, `src/model/reference.ts`, `src/model/validate.ts`, `scripts/check_reference.ts`, `README.md`, `program.md`, `PLAN.md`, `TIMELINE.md`
+
 ### Feature — CLI Auto-Start, UI Optional, Headless Mode
 
 1. **Auto-start URL params**: `p2p.html` now reads `autoStart`, `hideUI`, `maxSteps`, `maxSeconds` from URL query string. `autoStart=1` triggers training after 2s delay (signaling connect time). `hideUI=1` hides metrics grid, topology, chart — only shows log.
