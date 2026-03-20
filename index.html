@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGPU Distributed Training — Dashboard</title>
+  <meta name="description" content="Real-time dashboard for distributed GPT training across WebGPU browser workers">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/src/ui/dashboard.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header id="header">
+      <div class="header-left">
+        <div class="logo">
+          <span class="logo-icon">⚡</span>
+          <h1>WebGPU<span class="accent">Swarm</span></h1>
+        </div>
+        <div class="status-badge" id="connection-status">
+          <span class="status-dot"></span>
+          <span>Connecting...</span>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="header-stat">
+          <span class="stat-label">Step</span>
+          <span class="stat-value" id="step-counter">0</span>
+        </div>
+        <div class="header-stat">
+          <span class="stat-label">Workers</span>
+          <span class="stat-value" id="worker-count">0</span>
+        </div>
+        <div class="header-stat">
+          <span class="stat-label">Elapsed</span>
+          <span class="stat-value" id="elapsed-time">0:00</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main id="main">
+      <!-- Top Stats Bar -->
+      <section class="stats-bar" id="stats-section">
+        <div class="stat-card glow-blue" id="stat-loss">
+          <div class="stat-card-label">Current Loss</div>
+          <div class="stat-card-value" id="current-loss">—</div>
+          <div class="stat-card-sub" id="loss-trend"></div>
+        </div>
+        <div class="stat-card glow-green" id="stat-best">
+          <div class="stat-card-label">Best Loss</div>
+          <div class="stat-card-value" id="best-loss">—</div>
+          <div class="stat-card-sub">all time</div>
+        </div>
+        <div class="stat-card glow-purple" id="stat-throughput">
+          <div class="stat-card-label">Throughput</div>
+          <div class="stat-card-value" id="tokens-per-sec">—</div>
+          <div class="stat-card-sub">tokens/sec</div>
+        </div>
+        <div class="stat-card glow-orange" id="stat-tokens">
+          <div class="stat-card-label">Total Tokens</div>
+          <div class="stat-card-value" id="total-tokens">0</div>
+          <div class="stat-card-sub">processed</div>
+        </div>
+      </section>
+
+      <!-- Charts Row -->
+      <section class="charts-row" id="charts-section">
+        <div class="chart-container">
+          <div class="chart-header">
+            <h2>Loss Curve</h2>
+            <div class="chart-legend">
+              <span class="legend-item"><span class="legend-dot blue"></span>Raw</span>
+              <span class="legend-item"><span class="legend-dot green"></span>Smoothed</span>
+            </div>
+          </div>
+          <canvas id="loss-chart" width="800" height="300"></canvas>
+        </div>
+        <div class="chart-container">
+          <div class="chart-header">
+            <h2>Worker Activity</h2>
+          </div>
+          <canvas id="worker-chart" width="400" height="300"></canvas>
+        </div>
+      </section>
+
+      <!-- Workers Grid -->
+      <section class="workers-section" id="workers-section">
+        <div class="section-header">
+          <h2>Connected Workers</h2>
+          <div class="worker-actions">
+            <button class="btn btn-secondary" id="btn-add-worker">+ Add Worker Tab</button>
+          </div>
+        </div>
+        <div class="workers-grid" id="workers-grid">
+          <div class="empty-state" id="empty-workers">
+            <div class="empty-icon">🖥️</div>
+            <p>No workers connected yet</p>
+            <p class="muted">Open <a href="/worker.html" target="_blank">worker.html</a> in a new tab to join</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Model Config -->
+      <section class="config-section" id="config-section">
+        <div class="section-header">
+          <h2>Model Configuration</h2>
+        </div>
+        <div class="config-grid" id="config-grid">
+          <!-- Populated by JS -->
+        </div>
+      </section>
+
+      <!-- Training Log -->
+      <section class="log-section" id="log-section">
+        <div class="section-header">
+          <h2>Training Log</h2>
+          <button class="btn btn-ghost" id="btn-clear-log">Clear</button>
+        </div>
+        <div class="log-container" id="log-container">
+          <div class="log-entry info">Dashboard initialized. Waiting for coordinator connection...</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="/src/ui/dashboard.ts"></script>
+</body>
+</html>

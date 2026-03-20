@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGPU Worker — Distributed Training</title>
+  <meta name="description" content="WebGPU compute worker for distributed GPT training">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/src/ui/worker.css">
+</head>
+<body>
+  <div id="worker-app">
+    <!-- Worker Header -->
+    <header class="worker-header">
+      <div class="worker-logo">
+        <span class="pulse-dot"></span>
+        <h1>WebGPU Worker</h1>
+      </div>
+      <div class="worker-status" id="worker-status">
+        <span class="status-badge connecting">Initializing...</span>
+      </div>
+    </header>
+
+    <!-- Worker Info Cards -->
+    <main class="worker-main">
+      <div class="worker-cards">
+        <div class="worker-card" id="gpu-card">
+          <div class="card-icon">🎮</div>
+          <div class="card-content">
+            <div class="card-label">GPU Device</div>
+            <div class="card-value" id="gpu-info">Detecting...</div>
+          </div>
+        </div>
+
+        <div class="worker-card" id="step-card">
+          <div class="card-icon">📊</div>
+          <div class="card-content">
+            <div class="card-label">Steps Completed</div>
+            <div class="card-value" id="steps-completed">0</div>
+          </div>
+        </div>
+
+        <div class="worker-card" id="loss-card">
+          <div class="card-icon">📉</div>
+          <div class="card-content">
+            <div class="card-label">Last Loss</div>
+            <div class="card-value" id="last-loss">—</div>
+          </div>
+        </div>
+
+        <div class="worker-card" id="speed-card">
+          <div class="card-icon">⚡</div>
+          <div class="card-content">
+            <div class="card-label">Avg Speed</div>
+            <div class="card-value" id="avg-speed">— ms/step</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Activity Visualization -->
+      <div class="activity-section">
+        <h2>GPU Activity</h2>
+        <div class="activity-bars" id="activity-bars">
+          <!-- GPU utilization bars rendered by JS -->
+        </div>
+      </div>
+
+      <!-- Log -->
+      <div class="worker-log-section">
+        <h2>Worker Log</h2>
+        <div class="worker-log" id="worker-log">
+          <div class="log-entry">Worker initializing...</div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="/src/ui/worker-ui.ts"></script>
+</body>
+</html>

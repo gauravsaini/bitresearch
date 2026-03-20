@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebGPU P2P Worker — Distributed Training</title>
+  <meta name="description" content="Peer-to-peer WebGPU worker for decentralized GPT training via WebRTC">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #0a0b0f;
+      --bg-card: rgba(20, 22, 32, 0.85);
+      --bg-card-hover: rgba(28, 31, 45, 0.9);
+      --text-primary: #e8eaf0;
+      --text-secondary: #8b8fa4;
+      --text-muted: #565a6e;
+      --accent-blue: #4f8cff;
+      --accent-green: #34d399;
+      --accent-purple: #a78bfa;
+      --accent-orange: #fb923c;
+      --accent-red: #f87171;
+      --accent-cyan: #22d3ee;
+      --border-default: rgba(255, 255, 255, 0.06);
+      --border-hover: rgba(255, 255, 255, 0.12);
+      --radius-md: 12px;
+      --radius-sm: 8px;
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--font-sans);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(circle at 25% 25%, rgba(34, 211, 238, 0.05), transparent 50%),
+        radial-gradient(circle at 75% 75%, rgba(167, 139, 250, 0.04), transparent 50%),
+        radial-gradient(circle at 50% 50%, rgba(52, 211, 153, 0.03), transparent 60%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    #p2p-app {
+      position: relative;
+      z-index: 1;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 20px 24px 48px;
+    }
+
+    /* Header */
+    .p2p-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 0 20px;
+      border-bottom: 1px solid var(--border-default);
+      margin-bottom: 24px;
+    }
+
+    .p2p-logo {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .p2p-logo h1 {
+      font-size: 1.4rem;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+    }
+
+    .p2p-logo .gradient-text {
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .ring-viz {
+      width: 48px;
+      height: 48px;
+      position: relative;
+    }
+
+    .ring-viz svg {
+      width: 100%;
+      height: 100%;
+      animation: ringRotate 8s linear infinite;
+    }
+
+    @keyframes ringRotate {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    .header-controls {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .btn {
+      padding: 10px 20px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-default);
+      background: var(--bg-card);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 200ms;
+    }
+
+    .btn:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-1px);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+      border-color: transparent;
+      color: #fff;
+      box-shadow: 0 4px 16px rgba(34, 211, 238, 0.2);
+    }
+
+    .btn-primary:hover {
+      box-shadow: 0 6px 24px rgba(34, 211, 238, 0.3);
+    }
+
+    .btn-danger {
+      background: rgba(248, 113, 113, 0.15);
+      border-color: rgba(248, 113, 113, 0.3);
+      color: var(--accent-red);
+    }
+
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* Network Topology Visualization */
+    .topology-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+
+    .topology-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .topology-header h2 {
+      font-size: 1rem;
+      font-weight: 700;
+    }
+
+    .ring-status {
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .ring-status.waiting {
+      background: rgba(251, 146, 60, 0.12);
+      color: var(--accent-orange);
+      border: 1px solid rgba(251, 146, 60, 0.3);
+    }
+
+    .ring-status.formed {
+      background: rgba(34, 211, 238, 0.12);
+      color: var(--accent-cyan);
+      border: 1px solid rgba(34, 211, 238, 0.3);
+    }
+
+    .topology-canvas {
+      width: 100%;
+      height: 200px;
+      position: relative;
+    }
+
+    #ring-canvas {
+      width: 100%;
+      height: 100%;
+    }
+
+    .peer-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .peer-card {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-sm);
+      padding: 14px;
+      transition: all 200ms;
+    }
+
+    .peer-card.is-self {
+      border-color: rgba(34, 211, 238, 0.3);
+      background: rgba(34, 211, 238, 0.05);
+    }
+
+    .peer-card.connected {
+      border-color: rgba(52, 211, 153, 0.3);
+    }
+
+    .peer-card .peer-id {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .peer-card .peer-label {
+      font-weight: 600;
+      font-size: 0.9rem;
+      margin: 4px 0;
+    }
+
+    .peer-card .peer-meta {
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+    }
+
+    .peer-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      margin-right: 5px;
+    }
+
+    .peer-dot.connected { background: var(--accent-green); }
+    .peer-dot.connecting { background: var(--accent-orange); animation: pulse 1s ease infinite; }
+    .peer-dot.self { background: var(--accent-cyan); }
+    .peer-dot.disconnected { background: var(--text-muted); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    /* Metrics */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .metric-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 18px 20px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .metric-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+    }
+
+    .metric-card:nth-child(1)::before { background: linear-gradient(90deg, var(--accent-cyan), transparent); }
+    .metric-card:nth-child(2)::before { background: linear-gradient(90deg, var(--accent-green), transparent); }
+    .metric-card:nth-child(3)::before { background: linear-gradient(90deg, var(--accent-purple), transparent); }
+    .metric-card:nth-child(4)::before { background: linear-gradient(90deg, var(--accent-blue), transparent); }
+    .metric-card:nth-child(5)::before { background: linear-gradient(90deg, var(--accent-orange), transparent); }
+
+    .metric-label {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .metric-value {
+      font-family: var(--font-mono);
+      font-size: 1.5rem;
+      font-weight: 700;
+    }
+
+    .metric-card:nth-child(1) .metric-value { color: var(--accent-cyan); }
+    .metric-card:nth-child(2) .metric-value { color: var(--accent-green); }
+    .metric-card:nth-child(3) .metric-value { color: var(--accent-purple); }
+    .metric-card:nth-child(4) .metric-value { color: var(--accent-blue); }
+    .metric-card:nth-child(5) .metric-value { color: var(--accent-orange); }
+
+    .metric-sub {
+      font-size: 0.68rem;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
+
+    /* Loss Chart */
+    .chart-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .chart-section h2 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    #p2p-loss-chart {
+      width: 100%;
+      height: 200px;
+    }
+
+    /* Training Log */
+    .log-section {
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-md);
+      padding: 20px;
+    }
+
+    .log-section h2 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    .log-container {
+      max-height: 260px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      line-height: 1.7;
+    }
+
+    .log-entry {
+      padding: 2px 0;
+      color: var(--text-secondary);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+    }
+
+    .log-entry.p2p { color: var(--accent-cyan); }
+    .log-entry.train { color: var(--accent-green); }
+    .log-entry.error { color: var(--accent-red); }
+    .log-entry.ar { color: var(--accent-purple); }
+
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 3px; }
+
+    @media (max-width: 768px) {
+      .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+      .peer-cards { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div id="p2p-app">
+    <!-- Header -->
+    <header class="p2p-header">
+      <div class="p2p-logo">
+        <div class="ring-viz">
+          <svg viewBox="0 0 48 48">
+            <circle cx="24" cy="24" r="18" fill="none" stroke="rgba(34, 211, 238, 0.3)" stroke-width="2"/>
+            <circle cx="24" cy="24" r="18" fill="none" stroke="url(#ringGrad)" stroke-width="2" stroke-dasharray="20 93" stroke-linecap="round"/>
+            <circle cx="24" cy="6" r="4" fill="#22d3ee"/>
+            <circle cx="42" cy="24" r="3" fill="#a78bfa"/>
+            <circle cx="24" cy="42" r="3" fill="#34d399"/>
+            <circle cx="6" cy="24" r="3" fill="#fb923c"/>
+            <defs>
+              <linearGradient id="ringGrad" x1="0" y1="0" x2="48" y2="48">
+                <stop offset="0%" stop-color="#22d3ee"/>
+                <stop offset="100%" stop-color="#a78bfa"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <h1><span class="gradient-text">P2P</span> Distributed Trainer</h1>
+      </div>
+      <div class="header-controls">
+        <button class="btn btn-primary" id="btn-start" onclick="startTraining()">▶ Start Training</button>
+        <button class="btn btn-danger" id="btn-stop" onclick="stopTraining()" disabled>⏹ Stop</button>
+      </div>
+    </header>
+
+    <!-- Metrics -->
+    <section class="metrics-grid" id="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-label">Training Step</div>
+        <div class="metric-value" id="m-step">0</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Loss</div>
+        <div class="metric-value" id="m-loss">—</div>
+        <div class="metric-sub" id="m-smooth-loss"></div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Peers Connected</div>
+        <div class="metric-value" id="m-peers">0</div>
+        <div class="metric-sub">via WebRTC</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Throughput</div>
+        <div class="metric-value" id="m-tps">—</div>
+        <div class="metric-sub">tokens/sec</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">All-Reduce</div>
+        <div class="metric-value" id="m-ar">— ms</div>
+        <div class="metric-sub">per step</div>
+      </div>
+    </section>
+
+    <!-- Network Topology -->
+    <section class="topology-section">
+      <div class="topology-header">
+        <h2>🌐 Ring Topology</h2>
+        <span class="ring-status waiting" id="ring-status">Waiting for peers</span>
+      </div>
+      <div class="topology-canvas">
+        <canvas id="ring-canvas"></canvas>
+      </div>
+      <div class="peer-cards" id="peer-cards">
+        <!-- Populated by JS -->
+      </div>
+    </section>
+
+    <!-- Loss Chart -->
+    <section class="chart-section">
+      <h2>📉 Training Loss</h2>
+      <canvas id="p2p-loss-chart"></canvas>
+    </section>
+
+    <!-- Log -->
+    <section class="log-section">
+      <h2>📋 Training Log</h2>
+      <div class="log-container" id="p2p-log"></div>
+    </section>
+  </div>
+
+  <script type="module">
+    import { DistributedTrainer } from '/src/distributed/trainer.ts';
+
+    let trainer = null;
+    const losses = [];
+    const smoothLosses = [];
+
+    // Make functions available globally
+    window.startTraining = startTraining;
+    window.stopTraining = stopTraining;
+
+    function addLog(msg, type = '') {
+      const log = document.getElementById('p2p-log');
+      if (!log) return;
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      const time = new Date().toLocaleTimeString();
+      entry.textContent = `[${time}] ${msg}`;
+      log.appendChild(entry);
+      log.scrollTop = log.scrollHeight;
+      while (log.children.length > 200) log.removeChild(log.firstChild);
+    }
+
+    function updateMetrics(m) {
+      setText('m-step', m.step.toString());
+      setText('m-loss', m.loss > 0 ? m.loss.toFixed(6) : '—');
+      setText('m-smooth-loss', m.smoothLoss > 0 ? `smooth: ${m.smoothLoss.toFixed(6)}` : '');
+      setText('m-peers', m.peersConnected.toString());
+      setText('m-tps', m.tokensPerSec > 0 ? Math.floor(m.tokensPerSec).toLocaleString() : '—');
+      setText('m-ar', m.allReduceTimeMs > 0 ? `${m.allReduceTimeMs.toFixed(0)} ms` : '— ms');
+
+      if (m.loss > 0) {
+        losses.push(m.loss);
+        smoothLosses.push(m.smoothLoss);
+        if (losses.length > 300) { losses.shift(); smoothLosses.shift(); }
+        drawLossChart();
+      }
+    }
+
+    function setText(id, text) {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text;
+    }
+
+    function drawRingTopology(ring, peers) {
+      const canvas = document.getElementById('ring-canvas');
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+
+      const w = rect.width;
+      const h = rect.height;
+      const cx = w / 2;
+      const cy = h / 2;
+      const radius = Math.min(w, h) * 0.35;
+
+      ctx.clearRect(0, 0, w, h);
+
+      if (!ring) {
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.font = '14px Inter';
+        ctx.textAlign = 'center';
+        ctx.fillText('Waiting for peers to form ring...', cx, cy);
+        return;
+      }
+
+      const N = ring.totalPeers;
+      const positions = [];
+
+      for (let i = 0; i < N; i++) {
+        const angle = (2 * Math.PI * i / N) - Math.PI / 2;
+        positions.push({
+          x: cx + radius * Math.cos(angle),
+          y: cy + radius * Math.sin(angle),
+        });
+      }
+
+      // Draw ring connections
+      ctx.strokeStyle = 'rgba(34, 211, 238, 0.15)';
+      ctx.lineWidth = 2;
+      for (let i = 0; i < N; i++) {
+        const from = positions[i];
+        const to = positions[(i + 1) % N];
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.lineTo(to.x, to.y);
+        ctx.stroke();
+      }
+
+      // Animated data flow arrows
+      const time = Date.now() / 1000;
+      for (let i = 0; i < N; i++) {
+        const from = positions[i];
+        const to = positions[(i + 1) % N];
+        const t = ((time * 0.5 + i * 0.3) % 1);
+        const ax = from.x + (to.x - from.x) * t;
+        const ay = from.y + (to.y - from.y) * t;
+
+        ctx.beginPath();
+        ctx.arc(ax, ay, 3, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(34, 211, 238, ${0.5 + 0.5 * Math.sin(t * Math.PI)})`;
+        ctx.fill();
+      }
+
+      // Draw nodes
+      for (let i = 0; i < N; i++) {
+        const pos = positions[i];
+        const isSelf = i === ring.self;
+        const nodeRadius = isSelf ? 14 : 10;
+
+        // Glow
+        if (isSelf) {
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, nodeRadius + 6, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(34, 211, 238, 0.1)';
+          ctx.fill();
+        }
+
+        // Node
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, nodeRadius, 0, Math.PI * 2);
+        const colors = ['#22d3ee', '#34d399', '#a78bfa', '#fb923c', '#f87171', '#4f8cff'];
+        ctx.fillStyle = isSelf ? '#22d3ee' : colors[i % colors.length];
+        ctx.fill();
+
+        // Label
+        ctx.fillStyle = '#fff';
+        ctx.font = `${isSelf ? '11' : '9'}px JetBrains Mono`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(isSelf ? 'ME' : `P${i}`, pos.x, pos.y);
+
+        // Position label below
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.font = '9px Inter';
+        ctx.fillText(`#${i}`, pos.x, pos.y + nodeRadius + 12);
+      }
+    }
+
+    function drawLossChart() {
+      const canvas = document.getElementById('p2p-loss-chart');
+      if (!canvas || losses.length < 2) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.scale(dpr, dpr);
+
+      const w = rect.width, h = rect.height;
+      const pad = { top: 10, right: 10, bottom: 20, left: 50 };
+      const pw = w - pad.left - pad.right;
+      const ph = h - pad.top - pad.bottom;
+
+      ctx.clearRect(0, 0, w, h);
+
+      const all = [...losses, ...smoothLosses].filter(v => v > 0 && isFinite(v));
+      if (!all.length) return;
+      const min = Math.min(...all) * 0.98;
+      const max = Math.max(...all) * 1.02;
+      const range = max - min || 1;
+
+      const toX = i => pad.left + (i / (losses.length - 1)) * pw;
+      const toY = v => pad.top + (1 - (v - min) / range) * ph;
+
+      // Grid
+      ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = pad.top + (i/4) * ph;
+        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(w-pad.right, y); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.font = '9px JetBrains Mono';
+        ctx.textAlign = 'right';
+        ctx.fillText((max - (i/4)*range).toFixed(3), pad.left-6, y+3);
+      }
+
+      // Raw loss
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(34, 211, 238, 0.25)';
+      ctx.lineWidth = 1;
+      losses.forEach((v, i) => { i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)); });
+      ctx.stroke();
+
+      // Smoothed
+      ctx.beginPath();
+      ctx.strokeStyle = '#34d399';
+      ctx.lineWidth = 2;
+      smoothLosses.forEach((v, i) => { i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)); });
+      ctx.stroke();
+    }
+
+    async function startTraining() {
+      document.getElementById('btn-start').disabled = true;
+      document.getElementById('btn-stop').disabled = false;
+
+      addLog('Initializing distributed trainer...', 'p2p');
+
+      trainer = new DistributedTrainer({
+        batchSize: 2,
+        learningRate: 0.001,
+        signalingUrl: `ws://${location.hostname}:8788`,
+        modelConfig: {
+          sequenceLen: 256,
+          vocabSize: 4096,
+          nLayer: 2,
+          nHead: 4,
+          nKvHead: 4,
+          nEmbd: 128,
+          windowPattern: 'L',
+        },
+      });
+
+      trainer.onLog = (msg) => {
+        const type = msg.includes('[P2P]') || msg.includes('[AR]') ? 'p2p' :
+                     msg.includes('Step') ? 'train' :
+                     msg.includes('❌') ? 'error' : '';
+        addLog(msg, type);
+      };
+
+      trainer.onMetricsUpdate = (m) => {
+        updateMetrics(m);
+      };
+
+      // Update ring visualization periodically
+      setInterval(() => {
+        if (trainer) {
+          const mesh = trainer['mesh'];
+          drawRingTopology(mesh?.topology, mesh?.getPeerInfos());
+
+          // Update ring status
+          const statusEl = document.getElementById('ring-status');
+          if (mesh?.topology) {
+            statusEl.className = 'ring-status formed';
+            statusEl.textContent = `Ring: ${mesh.topology.totalPeers} peers`;
+          }
+
+          // Update peer cards
+          updatePeerCards(mesh);
+        }
+      }, 500);
+
+      try {
+        await trainer.startTraining();
+      } catch (e) {
+        addLog(`Error: ${e}`, 'error');
+      }
+    }
+
+    function stopTraining() {
+      if (trainer) {
+        trainer.stop();
+        trainer = null;
+      }
+      document.getElementById('btn-start').disabled = false;
+      document.getElementById('btn-stop').disabled = true;
+      addLog('Training stopped', 'train');
+    }
+
+    function updatePeerCards(mesh) {
+      const container = document.getElementById('peer-cards');
+      if (!container || !mesh) return;
+
+      const peers = mesh.getPeerInfos();
+      const ring = mesh.topology;
+
+      let html = '';
+
+      // Self card
+      html += `
+        <div class="peer-card is-self">
+          <div class="peer-id">${mesh.peerId.slice(-8)}</div>
+          <div class="peer-label"><span class="peer-dot self"></span>This Worker (You)</div>
+          <div class="peer-meta">Position: ${ring ? `#${ring.self}` : '—'}</div>
+        </div>
+      `;
+
+      // Peer cards
+      for (const peer of peers) {
+        const stateClass = peer.state === 'connected' ? 'connected' : peer.state;
+        html += `
+          <div class="peer-card ${stateClass}">
+            <div class="peer-id">${peer.peerId.slice(-8)}</div>
+            <div class="peer-label"><span class="peer-dot ${peer.state}"></span>${peer.state}</div>
+            <div class="peer-meta">
+              ↓ ${(peer.bytesReceived / 1024).toFixed(0)}KB |
+              ↑ ${(peer.bytesSent / 1024).toFixed(0)}KB
+            </div>
+          </div>
+        `;
+      }
+
+      container.innerHTML = html;
+    }
+
+    addLog('P2P Distributed Trainer loaded. Click "Start Training" to begin.', 'p2p');
+  </script>
+</body>
+</html>
