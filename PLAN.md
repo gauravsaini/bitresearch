@@ -60,90 +60,24 @@ graph TB
 
 | Component | Technology |
 |-----------|-----------|
-| GPU Compute | WebGPU + WGSL shaders |
+| GPU Compute | **TensorFlow.js** (`@tensorflow/tfjs-backend-webgpu`) |
 | Frontend | TypeScript + Vite |
 | Server | Node.js + Express + ws |
-| Communication | WebSocket (binary protocol) |
+| Communication | WebRTC (DataChannels P2P) + WebSocket signaling |
 | Styling | Vanilla CSS (premium dark theme) |
 | Charting | Canvas-based (custom) |
 
-## Project Structure
-
-```
-webgpu-distributed/
-├── package.json
-├── vite.config.ts
-├── tsconfig.json
-├── server/
-│   ├── index.ts              # Express + WebSocket server
-│   ├── parameter-server.ts   # Model parameter management
-│   ├── gradient-aggregator.ts # Gradient averaging
-│   ├── data-distributor.ts   # Batch distribution
-│   └── protocol.ts           # Binary message format
-├── src/
-│   ├── gpu/
-│   │   ├── device.ts         # WebGPU device init
-│   │   ├── tensor.ts         # GPU tensor class
-│   │   ├── ops.ts            # Tensor operations
-│   │   └── shaders/
-│   │       ├── matmul.wgsl
-│   │       ├── attention.wgsl
-│   │       ├── elementwise.wgsl
-│   │       ├── embedding.wgsl
-│   │       ├── normalization.wgsl
-│   │       ├── softmax.wgsl
-│   │       ├── cross_entropy.wgsl
-│   │       └── rotary.wgsl
-│   ├── model/
-│   │   ├── config.ts         # GPTConfig
-│   │   ├── gpt.ts            # Full GPT model
-│   │   ├── attention.ts      # CausalSelfAttention
-│   │   ├── mlp.ts            # MLP block
-│   │   └── embedding.ts      # Token + positional embeddings
-│   ├── train/
-│   │   ├── trainer.ts        # Training loop
-│   │   ├── optimizer.ts      # AdamW optimizer
-│   │   └── scheduler.ts      # LR schedule
-│   ├── distributed/
-│   │   ├── worker-client.ts  # WebSocket worker client
-│   │   └── protocol.ts       # Shared protocol types
-│   ├── ui/
-│   │   ├── dashboard.ts      # Dashboard components
-│   │   ├── worker-ui.ts      # Worker status UI
-│   │   └── charts.ts         # Loss curve charts
-│   ├── worker.ts             # Worker entry point
-│   └── dashboard.ts          # Dashboard entry point
-├── worker.html               # Worker page
-└── index.html                # Dashboard page
-```
-
-## Key Design Decisions
-
-### 1. Simplified Model for WebGPU
-- Use **f32** (WebGPU's f16 support is limited/optional)
-- Replace Flash Attention 3 with a **naive causal attention** (WGSL shader)
-- Simplify optimizer to **AdamW only** (Muon requires SVD-like ops)
-- Smaller default model (depth=4, ASPECT_RATIO=32) for browser performance
-
-### 2. Gradient Compression
-- Send **f16 gradients** over WebSocket to reduce bandwidth
-- Optional top-k sparsification for slow connections
-
-### 3. Fault Tolerance
-- Workers can join/leave at any time
-- Coordinator tracks active workers and adjusts batch distribution
-- Stale gradients are discarded (staleness threshold)
-
 ## Production Roadmap & Next Steps
 
-Ranked by the highest value for taking this distributed WebGPU training to production.
+Ranked by the highest value for taking this distributed training to production.
 
-### Priority 1: Full backward pass on WebGPU
-**Value:** Absolute Blocker. We cannot train a model without computing real gradients.
-- [ ] Scaffold the automatic differentiation (autograd) graph in the `Tensor` class.
-- [ ] Implement WGSL shaders for backward operations (e.g., `matmul_backward`, `attention_backward`, `layernorm_backward`).
-- [ ] Wire the cross-entropy loss output back to the model parameters in the training loop.
-- [ ] Validate gradients against a PyTorch reference for identical inputs.
+### Priority 1: Port GPT Model to TensorFlow.js
+**Value:** Massive architectural win. Replaces thousands of lines of fragile WGSL shaders with robust, optimized TFJS ops offering free automatic differentiation.
+- [ ] Install `@tensorflow/tfjs` and `@tensorflow/tfjs-backend-webgpu`.
+- [ ] Delete the custom `src/gpu/` module and manual WGSL shaders.
+- [ ] Rewrite `GPTModel` using `tf.tidy`, `tf.matMul`, `tf.softmax`, and `tf.variable` for weights.
+- [ ] Extract gradients efficiently using `tf.valueAndGrads` during the local forward pass.
+- [ ] Apply averaged gradients across the ring using TFJS's `tf.train.adamw` optimizer.
 
 ### Priority 2: Gradient compression
 **Value:** High. Raw parameter gradients are too large for efficient WebRTC transfer. Compression unlocks fast iteration speeds.
