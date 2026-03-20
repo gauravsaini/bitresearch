@@ -10,12 +10,12 @@
 | **Hardware** | Single NVIDIA GPU | Any device with a browser (Chrome/Safari/Edge) |
 | **Scaling** | Single GPU | Distributed across browser tabs via WebRTC ring all-reduce |
 | **Run command** | `uv run train.py` | `pnpm run train:headless` |
-| **Data** | Download + tokenize via `prepare.py` | Pre-tokenized at `public/data/tokens.bin` |
+| **Data** | `uv run prepare.py --dataset <dataset>` | `pnpm run prepare:data` |
 | **Editable files** | `train.py` | `src/distributed/trainer.ts`, `src/model/gpt.ts` |
 | **Validation** | `evaluate_bpb()` in `prepare.py` | `evaluateBpb()` in `trainer.ts` |
 | **Metric** | `val_bpb` (bits per byte) | `val_bpb` (bits per byte) |
 | **Autonomous loop** | `program.md` instructs the agent | Same `program.md` protocol |
-| **Setup** | `uv run prepare.py && git checkout -b autoresearch/<tag>` | `pnpm install && git checkout -b bitresearch/<tag>` |
+| **Setup** | `uv run prepare.py --dataset <dataset> && git checkout -b autoresearch/<tag>` | `pnpm install && pnpm run prepare:data && git checkout -b bitresearch/<tag>` |
 | **No Python** | — | ✅ Zero Python at runtime |
 
 ## Overview
@@ -77,6 +77,30 @@ pnpm run train
 
 This launches the signaling server, Vite dev server, opens 3 browser tabs, and auto-starts training in each. Like Karpathy's autoresearch — just run and go.
 
+### Data Preparation Parity
+
+Karpathy's data prep entrypoint is:
+
+```bash
+uv run prepare.py --dataset <dataset>
+```
+
+The bitresearch parity path is:
+
+```bash
+pnpm run prepare:data
+```
+
+This script uses `rustbpe-wasm` instead of the Python `rustbpe` binding, keeps the same split pattern and BOS packing behavior, and writes parity `.bin` shards to `~/.cache/autoresearch/bin/`.
+
+The browser runtime still reads [public/data/tokens.bin](/Users/ektasaini/Desktop/bitresearch/public/data/tokens.bin); the prepare script is the Karpathy-aligned tokenizer path for regenerating and validating shard tokenization.
+
+Before running it, place extracted `shard_*.txt` files under `~/.cache/autoresearch/text/`. If you only want a quick parity check on a subset, you can limit work with:
+
+```bash
+PREPARE_WASM_TOKENIZE_SHARDS=1 pnpm run prepare:data
+```
+
 **More options:**
 
 ```bash
@@ -113,7 +137,7 @@ pnpm run dev:p2p
 
 | Karpathy's autoresearch | This project | Purpose |
 |---|---|---|
-| `prepare.py` (data + tokenizer) | `public/data/tokens.bin` (pre-tokenized) | Data ships ready. No Python needed. |
+| `prepare.py` (data + tokenizer) | `scripts/prepare_wasm.ts` | Rust/WASM parity prep path for Karpathy-style shard tokenization. |
 | `train.py` (training loop) | `src/distributed/trainer.ts` | Forward/backward, optimizer, all-reduce, loss scaling. 100% browser-based. |
 | `train.py` (GPT model) | `src/model/gpt.ts` | TFJS transformer: RoPE, RMSNorm, sliding window attention. |
 | `make_dataloader()` | `src/data/dataloader.ts` | `TokenDataLoader` streams batches from `tokens.bin`. |
