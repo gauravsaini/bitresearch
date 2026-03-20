@@ -2,6 +2,38 @@
 
 > Port Karpathy's autoresearch GPT training to WebGPU and enable distributed data-parallel training across a swarm of browser-based workers.
 
+## Current Focus — Karpathy Parity (2026-03-21)
+
+Primary goal: close the highest-impact implementation gaps against `karpathy/autoresearch` while preserving the browser/WebGPU/WebRTC architecture.
+
+### Active Parity Workstreams
+
+- [ ] Data pipeline parity
+  - [ ] Replace flat sequential token batching with BOS-aligned best-fit document packing.
+  - [ ] Support document-oriented token inputs in the browser data path.
+  - [ ] Keep validation batching compatible with Karpathy-style held-out evaluation.
+
+- [ ] Model parity
+  - [ ] Implement value embeddings / gated value residuals.
+  - [ ] Make `windowPattern` affect attention semantics instead of acting as config-only metadata.
+  - [ ] Correctly support `nKvHead < nHead` for GQA-style attention.
+
+- [ ] Trainer parity
+  - [ ] Replace approximate BPB with token-byte-aware BPB.
+  - [ ] Improve LR scheduling toward Karpathy-style warmup / warmdown behavior.
+  - [ ] Integrate improved data/model surfaces without regressing checkpointing or UI flows.
+
+- [ ] Prepare/tokenizer parity
+  - [ ] Persist tokenizer artifacts needed downstream, not just shard bins.
+  - [ ] Emit metadata for BOS/special-token IDs and token byte lengths.
+  - [ ] Keep large-shard WASM tokenization stable under browser/Node memory limits.
+
+### Constraints
+
+- We are intentionally not copying CUDA-specific implementation details literally.
+- FlashAttention, `torch.compile`, bf16 autocast, and Muon need browser-appropriate equivalents rather than direct ports.
+- `PLAN.md` and `TIMELINE.md` are maintained on the main thread to avoid merge conflicts while subagents work in parallel.
+
 ## Architecture Overview
 
 ```mermaid
