@@ -10,7 +10,11 @@
     "dev:signaling": "tsx watch server/signaling.ts",
     "dev:client": "vite",
     "build": "vite build && tsc -p tsconfig.server.json",
-    "start": "node dist/server/index.js"
+    "start": "node dist/server/index.js",
+    "train": "tsx scripts/launch.ts",
+    "train:5": "tsx scripts/launch.ts --peers 5",
+    "train:no-ui": "tsx scripts/launch.ts --no-ui",
+    "train:headless": "tsx scripts/launch.ts --no-ui --timeout 300"
   },
   "dependencies": {
     "@petamoriken/float16": "^3.9.3",

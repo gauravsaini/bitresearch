@@ -50,17 +50,42 @@ The core infrastructure and WebRTC ring topology are implemented. To make this p
 - `pnpm`
 - A browser with WebGPU enabled (Chrome 113+, Edge 113+, Safari 18+)
 
-### Starting the Training Swarm
+### Quick Start (CLI — Karpathy Style)
+
+One command. No manual clicking. Auto-starts everything:
 
 ```bash
-# Install dependencies
 pnpm install
-
-# Start the signaling server + Vite dev server
-pnpm run dev:p2p
+pnpm run train
 ```
 
-Then open multiple tabs to `http://localhost:5173/p2p.html`. The tabs will automatically discover each other via the signaling server, negotiate WebRTC connections, form a ring topology, and begin distributed training.
+This launches the signaling server, Vite dev server, opens 3 browser tabs, and auto-starts training in each. Like Karpathy's autoresearch — just run and go.
+
+**More options:**
+
+```bash
+# 5 peers instead of 3
+pnpm run train:5
+
+# Headless mode (no dashboard, minimal logging, auto-stop after 5min)
+pnpm run train:headless
+
+# Custom: 8 peers, stop after 600 seconds
+tsx scripts/launch.ts --peers 8 --timeout 600
+
+# Headless with custom step limit
+tsx scripts/launch.ts --no-ui --max-steps 500
+```
+
+### Manual Mode (Dev)
+
+```bash
+# Start signaling + Vite
+pnpm run dev:p2p
+
+# Then manually open tabs to http://localhost:5173/p2p.html
+# Or with auto-start: http://localhost:5173/p2p.html?autoStart=1
+```
 
 ## Tech Stack
 - **GPU Compute**: TensorFlow.js (`@tensorflow/tfjs-backend-webgpu`)

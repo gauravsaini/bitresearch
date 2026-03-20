@@ -572,8 +572,30 @@
     import { DistributedTrainer } from '/src/distributed/trainer.ts';
     import { Dashboard } from '/src/client/dashboard.ts';
 
+    // ── URL Param Parsing ───────────────────────────────────────
+    const params = new URLSearchParams(window.location.search);
+    const autoStart = params.has('autoStart') || params.get('auto') === '1';
+    const hideUI = params.has('hideUI') || params.get('noui') === '1';
+    const maxSteps = parseInt(params.get('maxSteps') || '0') || Infinity;
+    const maxSeconds = parseInt(params.get('maxSeconds') || params.get('timeout') || '0') || Infinity;
+    const peerCount = parseInt(params.get('peers') || '0') || 0;
+
+    // ── Headless Mode: hide all UI except log ───────────────────
+    if (hideUI) {
+      document.querySelector('.p2p-header .header-controls')?.setAttribute('style', 'display:none');
+      document.querySelector('.metrics-grid')?.setAttribute('style', 'display:none');
+      document.querySelector('.topology-section')?.setAttribute('style', 'display:none');
+      document.querySelector('.chart-section')?.setAttribute('style', 'display:none');
+      document.querySelector('.p2p-header')?.setAttribute('style', 'padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06)');
+      document.querySelector('.log-section')?.setAttribute('style', 'background:var(--bg-card);border:1px solid var(--border-default);border-radius:var(--radius-md);padding:16px;');
+      document.querySelector('.log-container')?.setAttribute('style', 'max-height:100vh;overflow-y:auto;');
+    }
+
     let trainer = null;
-    const dashboard = new Dashboard('metricsChart');
+    let dashboard = null;
+    if (!hideUI) {
+      dashboard = new Dashboard('metricsChart');
+    }
 
     // Make functions available globally
     window.startTraining = startTraining;
@@ -697,11 +719,11 @@
       }
     }
 
-    // Removed manual canvas charting in favor of robust Chart.js dashboard module.
-
     async function startTraining() {
-      document.getElementById('btn-start').disabled = true;
-      document.getElementById('btn-stop').disabled = false;
+      const btnStart = document.getElementById('btn-start');
+      const btnStop = document.getElementById('btn-stop');
+      if (btnStart) btnStart.disabled = true;
+      if (btnStop) btnStop.disabled = false;
 
       addLog('Initializing distributed trainer...', 'p2p');
 
@@ -725,29 +747,43 @@
           msg.includes('Step') ? 'train' :
             msg.includes('❌') ? 'error' : '';
         addLog(msg, type);
+        // In headless mode, also output to console for capture
+        if (hideUI) console.log(msg);
       };
 
       trainer.onMetricsUpdate = (m) => {
-        dashboard.update(m);
+        if (dashboard) dashboard.update(m);
+
+        // Enforce maxSteps / maxSeconds limits
+        if (maxSteps !== Infinity && m.step >= maxSteps) {
+          addLog(`🏁 Reached maxSteps=${maxSteps}, stopping.`, 'train');
+          trainer.stop();
+          printSummary(m);
+        }
+        if (maxSeconds !== Infinity && m.elapsedSeconds >= maxSeconds) {
+          addLog(`🏁 Reached maxSeconds=${maxSeconds}, stopping.`, 'train');
+          trainer.stop();
+          printSummary(m);
+        }
       };
 
-      // Update ring visualization periodically
-      setInterval(() => {
-        if (trainer) {
-          const mesh = trainer['mesh'];
-          drawRingTopology(mesh?.topology, mesh?.getPeerInfos());
+      // Update ring visualization periodically (only if UI visible)
+      if (!hideUI) {
+        setInterval(() => {
+          if (trainer) {
+            const mesh = trainer['mesh'];
+            drawRingTopology(mesh?.topology, mesh?.getPeerInfos());
 
-          // Update ring status
-          const statusEl = document.getElementById('ring-status');
-          if (mesh?.topology) {
-            statusEl.className = 'ring-status formed';
-            statusEl.textContent = `Ring: ${mesh.topology.totalPeers} peers`;
+            const statusEl = document.getElementById('ring-status');
+            if (mesh?.topology) {
+              statusEl.className = 'ring-status formed';
+              statusEl.textContent = `Ring: ${mesh.topology.totalPeers} peers`;
+            }
+
+            updatePeerCards(mesh);
           }
-
-          // Update peer cards
-          updatePeerCards(mesh);
-        }
-      }, 500);
+        }, 500);
+      }
 
       try {
         await trainer.startTraining();
@@ -756,13 +792,34 @@
       }
     }
 
+    function printSummary(m) {
+      const mem = performance?.memory ? (performance.memory.usedJSHeapSize / 1073741824).toFixed(1) : '0.0';
+      const summary = [
+        '---',
+        `val_loss:         ${m.smoothLoss.toFixed(6)}`,
+        `training_seconds: ${m.elapsedSeconds.toFixed(1)}`,
+        `tokens_per_sec:   ${Math.floor(m.tokensPerSec)}`,
+        `total_tokens_M:   ${(m.totalTokens / 1e6).toFixed(1)}`,
+        `num_steps:        ${m.step}`,
+        `peers:            ${m.peersConnected}`,
+        `all_reduce_ms:    ${m.allReduceTimeMs.toFixed(1)}`,
+        `grad_norm:        ${m.gradNorm.toFixed(4)}`,
+        '---'
+      ].join('\n');
+      addLog(summary, 'train');
+      console.log(summary);
+    }
+
     function stopTraining() {
       if (trainer) {
         trainer.stop();
+        if (trainer.metrics) printSummary(trainer.metrics);
         trainer = null;
       }
-      document.getElementById('btn-start').disabled = false;
-      document.getElementById('btn-stop').disabled = true;
+      const btnStart = document.getElementById('btn-start');
+      const btnStop = document.getElementById('btn-stop');
+      if (btnStart) btnStart.disabled = false;
+      if (btnStop) btnStop.disabled = true;
       addLog('Training stopped', 'train');
     }
 
@@ -775,7 +832,6 @@
 
       let html = '';
 
-      // Self card
       html += `
         <div class="peer-card is-self">
           <div class="peer-id">${mesh.peerId.slice(-8)}</div>
@@ -784,7 +840,6 @@
         </div>
       `;
 
-      // Peer cards
       for (const peer of peers) {
         const stateClass = peer.state === 'connected' ? 'connected' : peer.state;
         html += `
@@ -802,7 +857,14 @@
       container.innerHTML = html;
     }
 
-    addLog('BitSearch loaded. Click "Start Training" to begin.', 'p2p');
+    // ── Auto-Start Logic ────────────────────────────────────────
+    if (autoStart) {
+      addLog('Auto-start enabled. Starting training...', 'p2p');
+      // Small delay to let signaling server connect first
+      setTimeout(() => startTraining(), 2000);
+    } else {
+      addLog('BitSearch loaded. Click "Start Training" to begin.', 'p2p');
+    }
   </script>
 </body>
 
