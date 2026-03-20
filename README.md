@@ -1,4 +1,4 @@
-# WebGPU Distributed Training
+# bitresearch
 
 > Porting Karpathy's autoresearch GPT training to WebGPU and enabling distributed data-parallel training across a swarm of browser-based workers using WebRTC.
 
@@ -97,23 +97,16 @@ pnpm run dev:p2p
 
 | Karpathy's autoresearch | This project | Purpose |
 |---|---|---|
-| `prepare.py` (data + tokenizer) | `public/data/tokens.bin` (pre-tokenized, shipped) | Data prep is offline. Tokens are already exported — no Python needed at runtime. |
-| `train.py` (training loop) | `src/distributed/trainer.ts` | Training loop: forward/backward, optimizer, all-reduce, loss scaling, sparsification. 100% browser-based. |
-| `train.py` (GPT model) | `src/model/gpt.ts` | TFJS transformer: RoPE, RMSNorm, sliding window attention, residual ladder, softcap logits. |
-| `make_dataloader()` | `src/data/dataloader.ts` | `TokenDataLoader` fetches `tokens.bin` and streams batches via `nextBatch(B, T)`. |
+| `prepare.py` (data + tokenizer) | `public/data/tokens.bin` (pre-tokenized) | Data ships ready. No Python needed. |
+| `train.py` (training loop) | `src/distributed/trainer.ts` | Forward/backward, optimizer, all-reduce, loss scaling. 100% browser-based. |
+| `train.py` (GPT model) | `src/model/gpt.ts` | TFJS transformer: RoPE, RMSNorm, sliding window attention. |
+| `make_dataloader()` | `src/data/dataloader.ts` | `TokenDataLoader` streams batches from `tokens.bin`. |
 | `evaluate_bpb()` | `src/model/validate.ts` | Validation. |
 | Hyperparams (top of `train.py`) | `src/model/config.ts` + trainer config in `p2p.html` | Model size, LR, batch size, time budget. |
-| `run.log` / `grep "^val_loss:"` | Console output + `printSummary()` on stop | Structured summary for `grep`-based result extraction. |
+| `run.log` / `grep "^val_loss:"` | Console output + `printSummary()` on stop | Structured summary for result extraction. |
 | `results.tsv` | Manual (or pipe console output) | Log experiment results. |
 
-### Offline scripts (NOT part of runtime training)
-| Script | Purpose |
-|---|---|
-| `scripts/export_tokens.py` | One-time data prep: tokenizes text → `public/data/tokens.bin`. Already done, no need to re-run. |
-| `scripts/export_reference.py` | Exports PyTorch weights for gradient parity testing against TFJS. |
-| `scripts/train_reference.py` | PyTorch reference training loop for gradient validation. |
-
-**None of the Python scripts run during training.** The entire training pipeline — data loading, model forward/backward, optimization, gradient sync — runs in the browser via TFJS + WebRTC.
+**The entire training pipeline — data loading, model forward/backward, optimization, gradient sync — runs in the browser via TFJS + WebRTC. No Python at runtime.**
 
 ## Training Goal
 
@@ -124,6 +117,6 @@ This matches Karpathy's autoresearch protocol. Configure via:
 - **Time budget**: `--timeout 300` (5 min default in headless mode) or `--max-steps N`
 - **Model size**: Edit `src/model/config.ts` (`nLayer`, `nHead`, `nEmbd`, `vocabSize`)
 - **Hyperparams**: Edit trainer config in `p2p.html` or pass via URL params
-- **Data**: Tokens are pre-exported at `public/data/tokens.bin`. To re-export, run `python scripts/export_tokens.py` (offline, one-time).
+- **Data**: Tokens are pre-exported at `public/data/tokens.bin`.
 
 For custom goals (e.g., reach a target loss, maximize throughput), edit the `onMetricsUpdate` callback in `p2p.html` or the `printSummary()` function.
