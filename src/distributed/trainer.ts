@@ -20,6 +20,7 @@ export interface TrainerMetrics {
   step: number;
   loss: number;
   smoothLoss: number;
+  gradNorm: number;
   tokensPerSec: number;
   totalTokens: number;
   peersConnected: number;
@@ -50,6 +51,7 @@ export class DistributedTrainer {
     step: 0,
     loss: 0,
     smoothLoss: 0,
+    gradNorm: 0,
     tokensPerSec: 0,
     totalTokens: 0,
     peersConnected: 0,
@@ -154,6 +156,18 @@ export class DistributedTrainer {
     const loss = (await lossTensor.array()) as number;
     const computeTimeMs = performance.now() - computeStart;
 
+    // Compute global gradient norm
+    let gradNorm = 0;
+    const gradTensors = Object.values(grads);
+    if (gradTensors.length > 0) {
+      const sqNorms = gradTensors.map(g => tf.norm(g).square());
+      const totalNormSq = tf.addN(sqNorms);
+      gradNorm = Math.sqrt((await totalNormSq.data())[0]);
+      tf.dispose(sqNorms);
+      totalNormSq.dispose();
+    }
+    this.metrics.gradNorm = gradNorm;
+
     // 3. Serialize Gradients into a 1D Array for WebRTC payload
     let totalGradSize = 0;
     vars.forEach(v => totalGradSize += v.size);
@@ -241,7 +255,7 @@ export class DistributedTrainer {
           const peers = this.mesh.connectedPeerCount;
           const tps = this.metrics.tokensPerSec.toFixed(0);
           const elapsed = this.metrics.elapsedSeconds.toFixed(0);
-          this.log(`Step ${step} | loss=${loss.toFixed(6)} | smooth=${this.metrics.smoothLoss.toFixed(6)} | ${tps} tok/s | peers=${peers} | ${elapsed}s`);
+          this.log(`Step ${step} | loss=${loss.toFixed(6)} | smooth=${this.metrics.smoothLoss.toFixed(6)} | gradNorm=${this.metrics.gradNorm.toFixed(4)} | ${tps} tok/s | peers=${peers} | ${elapsed}s`);
         }
 
         // Periodic Memory Profiling
