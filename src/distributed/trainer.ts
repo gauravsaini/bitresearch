@@ -20,6 +20,13 @@ export interface TrainerConfig {
   minRingSize: number;      // pause training if connected peers < this
   checkpointInterval: number; // save checkpoint every N steps (0 = disabled)
   dataUrl: string;           // URL to fetch tokenized data (empty = synthetic)
+  artifactBaseUrl?: string;  // stable bundle root for parity-prepared artifacts
+  manifestUrl?: string;      // optional manifest URL for parity-prepared artifacts
+  documentsUrl?: string;     // optional explicit document payload URL
+  dataFormat?: 'auto' | 'tokens' | 'documents';
+  documentBufferSize?: number;
+  documentsAreBOSPrefixed?: boolean;
+  bosTokenId?: number;
   tokenBytesUrl?: string;    // optional URL for token byte lengths (enables exact BPB)
 }
 
@@ -49,8 +56,29 @@ const DEFAULT_TRAINER_CONFIG: TrainerConfig = {
   minRingSize: 1,
   checkpointInterval: 0,
   dataUrl: '/data/tokens.bin',
+  artifactBaseUrl: '',
+  manifestUrl: '',
+  documentsUrl: '',
+  dataFormat: 'auto',
+  documentBufferSize: 1000,
+  documentsAreBOSPrefixed: false,
+  bosTokenId: DEFAULT_CONFIG.vocabSize,
   tokenBytesUrl: '',
 };
+
+interface ParityArtifactManifest {
+  parityUrl?: string;
+  binUrl?: string;
+  tokenizerUrl?: string;
+  files?: {
+    bin?: string[];
+    tokenizer?: string[];
+  };
+  source?: {
+    binDir?: string;
+    tokenizerDir?: string;
+  };
+}
 
 export class DistributedTrainer {
   config: TrainerConfig;
@@ -61,6 +89,7 @@ export class DistributedTrainer {
   private dataLoader: TokenDataLoader | null = null;
   private valTokens: Int32Array | null = null;
   private tokenBytesTensor: tf.Tensor1D | null = null;
+  private parityManifest: ParityArtifactManifest | null = null;
   private running = false;
   private startTime = 0;
   valBpb: number = 0;
@@ -90,27 +119,219 @@ export class DistributedTrainer {
   private lossScale = 1024.0;
   private consecutiveGoodGradients = 0;
 
+  private hasValue(value?: string): boolean {
+    return Boolean(value && value.trim());
+  }
+
+  private normalizeUrl(value: string): string {
+    return value.trim();
+  }
+
+  private makeUrlCandidates(baseUrl: string, names: string[]): string[] {
+    const candidates: string[] = [];
+    for (const name of names) {
+      try {
+        candidates.push(new URL(name, baseUrl).toString());
+      } catch {
+        // Ignore malformed URLs and keep the candidate list best-effort.
+      }
+    }
+    return candidates;
+  }
+
+  private getArtifactBaseCandidates(): string[] {
+    const candidates = new Set<string>();
+    const explicitBase = this.config.artifactBaseUrl?.trim();
+    if (explicitBase) {
+      candidates.add(explicitBase);
+    }
+    return Array.from(candidates);
+  }
+
+  private getManifestUrlCandidates(): string[] {
+    const candidates = new Set<string>();
+
+    const explicitManifest = this.config.manifestUrl?.trim();
+    if (explicitManifest) {
+      candidates.add(this.normalizeUrl(explicitManifest));
+    }
+
+    for (const baseUrl of this.getArtifactBaseCandidates()) {
+      for (const candidate of this.makeUrlCandidates(baseUrl, ['manifest.json'])) {
+        candidates.add(candidate);
+      }
+    }
+
+    return Array.from(candidates);
+  }
+
+  private resolveUrl(baseUrl: string, relativePath: string): string {
+    return new URL(relativePath, baseUrl).toString();
+  }
+
+  private getManifestBinCandidates(manifest: ParityArtifactManifest): string[] {
+    const candidates = new Set<string>();
+    const baseUrl = manifest.binUrl?.trim()
+      || (manifest.parityUrl?.trim() ? this.resolveUrl(manifest.parityUrl.trim(), 'bin/') : null)
+      || (this.config.artifactBaseUrl?.trim() ? this.resolveUrl(this.config.artifactBaseUrl.trim(), 'bin/') : null);
+
+    if (!baseUrl) {
+      return [];
+    }
+
+    for (const fileName of manifest.files?.bin ?? []) {
+      if (!fileName.endsWith('.bin')) continue;
+      try {
+        candidates.add(this.resolveUrl(baseUrl, fileName));
+      } catch {
+        // Ignore malformed manifest paths and continue with the rest.
+      }
+    }
+
+    return Array.from(candidates);
+  }
+
+  private getManifestTokenBytesCandidates(manifest: ParityArtifactManifest): string[] {
+    const candidates = new Set<string>();
+    const tokenizerBase = manifest.tokenizerUrl?.trim()
+      || (manifest.parityUrl?.trim() ? this.resolveUrl(manifest.parityUrl.trim(), 'tokenizer/') : null)
+      || (this.config.artifactBaseUrl?.trim() ? this.resolveUrl(this.config.artifactBaseUrl.trim(), 'tokenizer/') : null);
+    const binBase = manifest.binUrl?.trim()
+      || (manifest.parityUrl?.trim() ? this.resolveUrl(manifest.parityUrl.trim(), 'bin/') : null)
+      || (this.config.artifactBaseUrl?.trim() ? this.resolveUrl(this.config.artifactBaseUrl.trim(), 'bin/') : null);
+
+    for (const baseUrl of [tokenizerBase, binBase]) {
+      if (!baseUrl) continue;
+      for (const candidate of this.makeUrlCandidates(baseUrl, ['token_bytes.bin', 'token-bytes.bin', 'token_bytes.json'])) {
+        candidates.add(candidate);
+      }
+    }
+
+    return Array.from(candidates);
+  }
+
+  private async loadParityManifest(): Promise<ParityArtifactManifest | null> {
+    if (this.parityManifest) {
+      return this.parityManifest;
+    }
+
+    const candidates = this.getManifestUrlCandidates();
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    for (const url of candidates) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) {
+          continue;
+        }
+        const manifest = await res.json() as ParityArtifactManifest;
+        this.log(`🗺️ Loaded parity manifest from ${url}`);
+        this.parityManifest = manifest;
+        return manifest;
+      } catch {
+        // Try the next manifest candidate.
+      }
+    }
+
+    return null;
+  }
+
+  private getDataUrlCandidates(): string[] {
+    const candidates = new Set<string>();
+    const dataFormat = this.config.dataFormat ?? 'auto';
+    const docsFirst = dataFormat !== 'tokens';
+    const rootNames = docsFirst
+      ? ['documents.json', 'docs.json', 'tokens.json', 'tokens.bin']
+      : ['tokens.bin', 'tokens.json', 'documents.json', 'docs.json'];
+    const binNames = docsFirst
+      ? ['documents.json', 'docs.json', 'tokens.json', 'tokens.bin', 'train.bin', 'train_tokens.bin']
+      : ['tokens.bin', 'tokens.json', 'documents.json', 'docs.json', 'train.bin', 'train_tokens.bin'];
+
+    const explicitDocumentsUrl = this.config.documentsUrl?.trim();
+    if (explicitDocumentsUrl) {
+      candidates.add(this.normalizeUrl(explicitDocumentsUrl));
+    }
+
+    for (const baseUrl of this.getArtifactBaseCandidates()) {
+      for (const candidate of this.makeUrlCandidates(baseUrl, rootNames)) {
+        candidates.add(candidate);
+      }
+      for (const candidate of this.makeUrlCandidates(this.resolveUrl(baseUrl, 'bin/'), binNames)) {
+        candidates.add(candidate);
+      }
+    }
+
+    const explicitDataUrl = this.config.dataUrl?.trim();
+    if (explicitDataUrl) {
+      candidates.add(this.normalizeUrl(explicitDataUrl));
+    }
+
+    return Array.from(candidates);
+  }
+
   private getTokenBytesUrlCandidates(): string[] {
     const candidates = new Set<string>();
 
     const explicit = this.config.tokenBytesUrl?.trim();
     if (explicit) {
-      candidates.add(explicit);
+      candidates.add(this.normalizeUrl(explicit));
+    }
+
+    const sidecarNames = ['token_bytes.bin', 'token-bytes.bin', 'token_bytes.json'];
+    for (const baseUrl of this.getArtifactBaseCandidates()) {
+      for (const candidate of this.makeUrlCandidates(this.resolveUrl(baseUrl, 'tokenizer/'), sidecarNames)) {
+        candidates.add(candidate);
+      }
+      for (const candidate of this.makeUrlCandidates(baseUrl, sidecarNames)) {
+        candidates.add(candidate);
+      }
+      for (const candidate of this.makeUrlCandidates(this.resolveUrl(baseUrl, 'bin/'), sidecarNames)) {
+        candidates.add(candidate);
+      }
+    }
+
+    if (this.config.documentsUrl?.trim()) {
+      try {
+        const baseHref = typeof window !== 'undefined' ? window.location.href : 'http://localhost/';
+        const documentsUrl = new URL(this.config.documentsUrl.trim(), baseHref);
+        for (const candidate of this.makeUrlCandidates(documentsUrl.toString(), sidecarNames)) {
+          candidates.add(candidate);
+        }
+      } catch {
+        // Ignore malformed URLs and fall back to other discovery paths.
+      }
     }
 
     if (this.config.dataUrl?.trim()) {
       try {
         const baseHref = typeof window !== 'undefined' ? window.location.href : 'http://localhost/';
-        const dataUrl = new URL(this.config.dataUrl, baseHref);
-        candidates.add(new URL('token_bytes.bin', dataUrl).toString());
-        candidates.add(new URL('token-bytes.bin', dataUrl).toString());
-        candidates.add(new URL('token_bytes.json', dataUrl).toString());
+        const dataUrl = new URL(this.config.dataUrl.trim(), baseHref);
+        for (const candidate of this.makeUrlCandidates(dataUrl.toString(), sidecarNames)) {
+          candidates.add(candidate);
+        }
       } catch {
         // Ignore malformed URLs and fall back to explicit configuration only.
       }
     }
 
     return Array.from(candidates);
+  }
+
+  private flattenDocuments(documents: Int32Array[]): Int32Array {
+    let total = 0;
+    for (const doc of documents) {
+      total += doc.length;
+    }
+
+    const flattened = new Int32Array(total);
+    let offset = 0;
+    for (const doc of documents) {
+      flattened.set(doc, offset);
+      offset += doc.length;
+    }
+    return flattened;
   }
 
   private normalizeTokenByteLengths(lengths: ArrayLike<number>): Int32Array {
@@ -127,14 +348,29 @@ export class DistributedTrainer {
   }
 
   private async loadTokenBytesTable(): Promise<void> {
-    const candidates = this.getTokenBytesUrlCandidates();
-    if (candidates.length === 0) {
+    const manifest = await this.loadParityManifest();
+    const orderedCandidates: string[] = [];
+    const pushUnique = (urls: string[]) => {
+      for (const url of urls) {
+        if (!orderedCandidates.includes(url)) {
+          orderedCandidates.push(url);
+        }
+      }
+    };
+
+    pushUnique(this.config.tokenBytesUrl?.trim() ? [this.normalizeUrl(this.config.tokenBytesUrl.trim())] : []);
+    if (manifest) {
+      pushUnique(this.getManifestTokenBytesCandidates(manifest));
+    }
+    pushUnique(this.getTokenBytesUrlCandidates());
+
+    if (orderedCandidates.length === 0) {
       return;
     }
 
     const shouldLogFailures = Boolean(this.config.tokenBytesUrl?.trim());
 
-    for (const url of candidates) {
+    for (const url of orderedCandidates) {
       try {
         const res = await fetch(url);
         if (!res.ok) {
@@ -178,6 +414,113 @@ export class DistributedTrainer {
     }
   }
 
+  private async loadTokenStreamFromUrls(urls: string[]): Promise<Int32Array> {
+    const chunks: Int32Array[] = [];
+    let total = 0;
+
+    for (const url of urls) {
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch parity shard ${url}: HTTP ${res.status}`);
+      }
+
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength === 0) {
+        continue;
+      }
+      if (buf.byteLength % 4 !== 0) {
+        throw new Error(`Parity shard ${url} is not 32-bit aligned (${buf.byteLength} bytes)`);
+      }
+
+      const chunk = new Int32Array(buf);
+      chunks.push(chunk);
+      total += chunk.length;
+    }
+
+    const merged = new Int32Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return merged;
+  }
+
+  private async loadTrainingDataFromManifest(manifest: ParityArtifactManifest): Promise<boolean> {
+    const binCandidates = this.getManifestBinCandidates(manifest);
+    if (binCandidates.length === 0) {
+      return false;
+    }
+
+    const vocabSize = this.config.modelConfig.vocabSize;
+    const loaderOptions = {
+      bosTokenId: this.config.bosTokenId ?? vocabSize,
+      documentBufferSize: this.config.documentBufferSize,
+      documentsAreBOSPrefixed: this.config.documentsAreBOSPrefixed,
+    };
+
+    const stream = await this.loadTokenStreamFromUrls(binCandidates);
+    const loader = new TokenDataLoader('', vocabSize, loaderOptions);
+    loader.setTokenStream(stream);
+    this.dataLoader = loader;
+    this.valTokens = loader.valSplit(0.1);
+    this.log(
+      `📦 Loaded parity shard stream from manifest ${this.config.manifestUrl || this.config.artifactBaseUrl || manifest.parityUrl || '/data/parity/manifest.json'} — ${binCandidates.length} shard files, ${(loader.numTokens / 1e3).toFixed(0)}K train, ${(this.valTokens.length / 1e3).toFixed(0)}K val`,
+    );
+    return true;
+  }
+
+  private async loadTrainingDataFromCandidates(): Promise<void> {
+    const candidates = this.getDataUrlCandidates();
+    const hasAnyConfiguredSource =
+      this.hasValue(this.config.documentsUrl) ||
+      this.hasValue(this.config.artifactBaseUrl) ||
+      this.hasValue(this.config.dataUrl);
+    if (candidates.length === 0 || !hasAnyConfiguredSource) {
+      return;
+    }
+
+    const vocabSize = this.config.modelConfig.vocabSize;
+    const loaderOptions = {
+      bosTokenId: this.config.bosTokenId ?? vocabSize,
+      documentBufferSize: this.config.documentBufferSize,
+      documentsAreBOSPrefixed: this.config.documentsAreBOSPrefixed,
+    };
+
+    for (const url of candidates) {
+      try {
+        const loader = new TokenDataLoader(url, vocabSize, loaderOptions);
+        await loader.load({ format: 'auto' });
+
+        try {
+          const { trainDocuments, valDocuments } = loader.splitDocuments(0.1);
+          const effectiveTrainDocuments = trainDocuments.length > 0 ? trainDocuments : valDocuments;
+          const trainLoader = new TokenDataLoader('', vocabSize, {
+            ...loaderOptions,
+            documentsAreBOSPrefixed: true,
+          });
+          trainLoader.setDocuments(effectiveTrainDocuments);
+          this.dataLoader = trainLoader;
+          this.valTokens = valDocuments.length > 0 ? this.flattenDocuments(valDocuments) : new Int32Array(0);
+          if (trainDocuments.length === 0 && valDocuments.length > 0) {
+            this.log(`⚠️ Document split from ${url} left no train docs; using the validation side for training.`);
+          }
+          this.log(`📦 Loaded document-aware training data from ${url} — ${effectiveTrainDocuments.length} training docs used, ${valDocuments.length} val docs`);
+          return;
+        } catch {
+          this.dataLoader = loader;
+          this.valTokens = loader.valSplit(0.1);
+          this.log(`📦 Loaded token stream from ${url} — ${(loader.numTokens / 1e3).toFixed(0)}K train, ${(this.valTokens.length / 1e3).toFixed(0)}K val`);
+          return;
+        }
+      } catch {
+        // Fall through to the next candidate.
+      }
+    }
+
+    this.log('⚠️ No configured data artifact could be loaded; falling back to synthetic batches');
+  }
+
   private log(msg: string): void {
     console.log(`[Trainer] ${msg}`);
     this.onLog?.(msg);
@@ -194,19 +537,12 @@ export class DistributedTrainer {
     vars.forEach(v => numParams += v.size);
     this.log(`📊 Model: ${(numParams / 1e6).toFixed(1)}M trainable params`);
 
-    // Load real tokenized data
-    if (this.config.dataUrl) {
-      this.log(`📦 Loading training data from ${this.config.dataUrl}...`);
-      try {
-        this.dataLoader = new TokenDataLoader(this.config.dataUrl, this.config.modelConfig.vocabSize);
-        await this.dataLoader.load();
-        const totalTokens = this.dataLoader.numTokens;
-        this.valTokens = this.dataLoader.valSplit(0.1);
-        this.log(`📦 Loaded ${(totalTokens / 1e3).toFixed(0)}K tokens — ${(this.dataLoader.numTokens / 1e3).toFixed(0)}K train, ${(this.valTokens.length / 1e3).toFixed(0)}K val`);
-      } catch (e) {
-        this.log(`⚠️ Failed to load data, falling back to synthetic: ${e}`);
-        this.dataLoader = null;
-      }
+    // Load parity-sharded data first, then fall back to legacy single-file sources.
+    const manifest = await this.loadParityManifest();
+    if (manifest && await this.loadTrainingDataFromManifest(manifest)) {
+      // Manifest-driven parity bundle loaded.
+    } else {
+      await this.loadTrainingDataFromCandidates();
     }
 
     await this.loadTokenBytesTable();

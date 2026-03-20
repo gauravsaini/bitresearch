@@ -581,6 +581,45 @@
     const maxSeconds = parseInt(params.get('maxSeconds') || params.get('timeout') || '0') || Infinity;
     const peerCount = parseInt(params.get('peers') || '0') || 0;
 
+    const parseStringParam = (name, fallback = '') => {
+      const value = params.get(name);
+      return value && value.trim() ? value.trim() : fallback;
+    };
+    const parseIntParam = (name, fallback = undefined) => {
+      const value = params.get(name);
+      if (value === null || value.trim() === '') return fallback;
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+    const parseBoolParam = (name, fallback = false) => {
+      const value = params.get(name);
+      if (value === null) return fallback;
+      if (value === '' || value === '1' || value.toLowerCase() === 'true' || value.toLowerCase() === 'yes') {
+        return true;
+      }
+      if (value === '0' || value.toLowerCase() === 'false' || value.toLowerCase() === 'no') {
+        return false;
+      }
+      return fallback;
+    };
+    const parseDataFormat = (value, fallback = 'auto') => {
+      if (value === 'tokens' || value === 'documents' || value === 'auto') {
+        return value;
+      }
+      return fallback;
+    };
+
+    const explicitDataSource = params.has('dataUrl') || params.has('documentsUrl') || params.has('artifactBaseUrl') || params.has('tokenBytesUrl') || params.has('manifestUrl');
+    const artifactBaseUrl = parseStringParam('artifactBaseUrl', explicitDataSource ? '' : '/data/parity/');
+    const dataFormat = parseDataFormat(params.get('dataFormat'), artifactBaseUrl ? 'documents' : 'auto');
+    const manifestUrl = parseStringParam('manifestUrl', '');
+    const dataUrl = parseStringParam('dataUrl', '');
+    const documentsUrl = parseStringParam('documentsUrl', '');
+    const tokenBytesUrl = parseStringParam('tokenBytesUrl', '');
+    const bosTokenId = parseIntParam('bosTokenId');
+    const documentBufferSize = parseIntParam('documentBufferSize');
+    const documentsAreBOSPrefixed = parseBoolParam('documentsAreBOSPrefixed', false);
+
     // ── Headless Mode: hide all UI except log ───────────────────
     if (hideUI) {
       document.querySelector('.p2p-header .header-controls')?.setAttribute('style', 'display:none');
@@ -732,6 +771,15 @@
         batchSize: 2,
         learningRate: 0.001,
         signalingUrl: `ws://${location.hostname}:8788`,
+        artifactBaseUrl: artifactBaseUrl || undefined,
+        manifestUrl: manifestUrl || undefined,
+        dataUrl: dataUrl || undefined,
+        documentsUrl: documentsUrl || undefined,
+        dataFormat,
+        tokenBytesUrl: tokenBytesUrl || undefined,
+        bosTokenId: Number.isFinite(bosTokenId) ? bosTokenId : undefined,
+        documentBufferSize: Number.isFinite(documentBufferSize) ? documentBufferSize : undefined,
+        documentsAreBOSPrefixed,
         modelConfig: {
           sequenceLen: 256,
           vocabSize: 4096,
@@ -742,6 +790,11 @@
           windowPattern: 'L',
         },
       });
+
+      addLog(
+        `Data config: base=${artifactBaseUrl || '—'} manifest=${manifestUrl || '—'} data=${dataUrl || '—'} docs=${documentsUrl || '—'} format=${dataFormat}`,
+        'p2p',
+      );
 
       trainer.onLog = (msg) => {
         const type = msg.includes('[P2P]') || msg.includes('[AR]') ? 'p2p' :
