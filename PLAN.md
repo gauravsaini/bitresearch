@@ -71,34 +71,46 @@ graph TB
 
 Ranked by the highest value for taking this distributed training to production.
 
-### Priority 1: Port GPT Model to TensorFlow.js
-**Value:** Massive architectural win. Replaces thousands of lines of fragile WGSL shaders with robust, optimized TFJS ops offering free automatic differentiation.
-- [ ] Install `@tensorflow/tfjs` and `@tensorflow/tfjs-backend-webgpu`.
-- [ ] Delete the custom `src/gpu/` module and manual WGSL shaders.
-- [ ] Rewrite `GPTModel` using `tf.tidy`, `tf.matMul`, `tf.softmax`, and `tf.variable` for weights.
-- [ ] Extract gradients efficiently using `tf.valueAndGrads` during the local forward pass.
-- [ ] Apply averaged gradients across the ring using TFJS's `tf.train.adamw` optimizer.
+### Priority 1: Port GPT Model to TensorFlow.js (Base Completed)
+**Value:** Massive architectural win. Replaces fragile WGSL shaders with robust TFJS ops offering free automatic differentiation.
+- [x] Baseline TFJS rewrite with `tf.variableGrads` and `tf.train.adamw`.
+- [ ] Add `tf.profile()` instrumentation to catch memory leaks in async flows.
+- [ ] Implement a lightweight WebGPU fallback path for unstable browsers (Safari/Old Chromium).
+- [ ] Add explicit weight initialization logic to exactly match PyTorch defaults for convergence parity.
 
-### Priority 2: Gradient compression
-**Value:** High. Raw parameter gradients are too large for efficient WebRTC transfer. Compression unlocks fast iteration speeds.
-- [ ] Implement `f32` to `f16` quantization and dequantization in JavaScript/WGSL.
-- [ ] Create a Top-K sparsification compute shader to identify and extract only the most significant gradient values.
-- [ ] Update the WebRTC data channel payload serialization to pack and unpack the compressed and sparsified tensors.
+### Priority 2: Gradient Correctness Validation (NEW - Critical Blocker)
+**Value:** Absolute necessity before optimizing compression. Ring allreduce bugs and TFJS initialization differences are silent and subtle.
+- [ ] Create a PyTorch reference script for a single forward/backward pass.
+- [ ] Add a `validate_gradients()` mode to compare single-peer TFJS gradients against PyTorch on the exact same batch.
+- [ ] Assert identical loss and gradient L2 norms.
 
-### Priority 3: TURN server support & Cross-network training
-**Value:** High. Browsers behind symmetric NATs (corporate networks, strict firewalls) will fail to connect P2P without TURN.
-- [ ] Deploy a Coturn server or provision a cloud TURN provider (e.g., Twilio, Metered).
-- [ ] Update the `RTCPeerConnection` configuration in `webrtc-mesh.ts` to include TURN credentials.
-- [ ] Deploy the Node.js signaling server (`server/signaling.ts`) to a public endpoint (e.g., Render, Fly.io) to allow workers from different networks to discover each other.
+### Priority 3: Gradient Compression
+**Value:** High. Raw parameter gradients are too large for efficient WebRTC transfer.
+- [x] Initial `f32` to `f16` quantization using `Float16Array` + SCTP streaming.
+- [ ] Implement **dynamic loss scaling** to detect and recover from f16 underflow during training.
+- [ ] Implement Top-K sparsification (Global aggregate vs Local per peer topology design).
+- [ ] Add an **error feedback buffer** (residual accumulation) so dropped gradients in sparsification don't permanently bias the model.
 
-### Priority 4: Dynamic ring reformation
-**Value:** Medium-High. Essential for swarm stability. If a single tab closes, the current ring hangs. 
-- [ ] Add strict timeout detection during `Reduce-Scatter` and `All-Gather` phases.
-- [ ] Implement a lightweight heartbeat mechanism between peers and the signaling server.
-- [ ] Automatically trigger ring rebuilding when a peer drops, discard the failed step's gradients, and seamlessly resume the training loop.
+### Priority 4: Observability / Training Dashboard (NEW)
+**Value:** Indispensable. Without this, debugging ring failures or compression artifacts in a distributed browser environment is nearly impossible.
+- [ ] Track and visualize loss curve over time.
+- [ ] Track gradient norms and step latencies.
+- [ ] Visualize peer count and ring health.
 
-### Priority 5: Checkpoint saving
-**Value:** Medium. Needed to extract the trained model and actually use the computation results.
-- [ ] Implement weight serialization into a standard format (e.g., `.safetensors` or raw binary).
-- [ ] Add an "Export Checkpoint" button in the Dashboard/Worker UI.
-- [ ] Allow downloading the serialized Blob directly from the browser memory.
+### Priority 5: Dynamic ring reformation
+**Value:** Medium-High. Essential for swarm stability. If a single tab closes, the current ring hangs.
+- [ ] Implement dynamically tuned heartbeat intervals tied to the expected step latency.
+- [ ] Add a minimum ring size threshold to pause training rather than continuing with degraded bandwidth.
+- [ ] Handle peer drops mid-Reduce-Scatter by gracefully aborting the step and recomputing rather than using partial gradients.
+
+### Priority 6: TURN server support & Cross-network training
+**Value:** High. Browsers behind symmetric NATs will fail to connect P2P without TURN.
+- [ ] Integrate Cloudflare Calls or Metered.ca as managed TURN alternatives.
+- [ ] Implement credential rotation (short-lived TURN tokens via HMAC) at the signaling layer.
+- [ ] Add the concept of "Rooms/Sessions" to the signaling server to run multiple independent training rings simultaneously.
+
+### Priority 7: Checkpoint saving
+**Value:** Medium. Needed to extract the trained model and resume computation.
+- [ ] Serialize weights into `.safetensors`.
+- [ ] Serialize **optimizer state** (Adam moments) to avoid warm-up penalties on resumption.
+- [ ] Implement a checkpoint versioning scheme (e.g., timestamp + step number in filename).

@@ -243,6 +243,12 @@ export class DistributedTrainer {
           const elapsed = this.metrics.elapsedSeconds.toFixed(0);
           this.log(`Step ${step} | loss=${loss.toFixed(6)} | smooth=${this.metrics.smoothLoss.toFixed(6)} | ${tps} tok/s | peers=${peers} | ${elapsed}s`);
         }
+
+        // Periodic Memory Profiling
+        if (step > 0 && step % 50 === 0) {
+          const mem = tf.memory();
+          this.log(`📊 Memory: ${mem.numTensors} tensors | ${(mem.numBytes / 1024 / 1024).toFixed(1)} MB`);
+        }
       } catch (e) {
         this.log(`❌ Training error: ${e}`);
         await new Promise(r => setTimeout(r, 1000));

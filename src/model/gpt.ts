@@ -31,32 +31,37 @@ export class GPTModel {
   }
 
   async init() {
-    await tf.setBackend('webgpu');
-    // Important: Wait for WebGPU to be ready
+    try {
+      await tf.setBackend('webgpu');
+    } catch (e) {
+      console.warn('WebGPU not supported or failed to initialize. Falling back to WebGL.');
+      await tf.setBackend('webgl');
+    }
     await tf.ready();
 
     const { vocabSize, nLayer, nHead, nKvHead, nEmbd, sequenceLen } = this.config;
     const headDim = nEmbd / nHead;
     const kvDim = nKvHead * headDim;
     
-    // Scale for initialization
-    const s = Math.sqrt(3) * Math.pow(nEmbd, -0.5);
+    // PyTorch GPT-2 standard initialization parity
+    const std = 0.02;
+    const projStd = 0.02 / Math.sqrt(2 * nLayer);
 
     tf.tidy(() => {
-      this.wte = tf.variable(tf.randomUniform([vocabSize, nEmbd], -s, s), true, 'wte');
-      this.lmHead = tf.variable(tf.randomUniform([vocabSize, nEmbd], -0.001, 0.001), true, 'lmHead');
+      this.wte = tf.variable(tf.randomStandardNormal([vocabSize, nEmbd]).mul(std), true, 'wte');
+      this.lmHead = tf.variable(tf.randomStandardNormal([vocabSize, nEmbd]).mul(std), true, 'lmHead');
       
       this.residLambdas = tf.variable(tf.ones([nLayer]), true, 'residLambdas');
       this.x0Lambdas = tf.variable(tf.fill([nLayer], 0.1), true, 'x0Lambdas');
 
       for (let i = 0; i < nLayer; i++) {
         this.layers.push({
-          qWeight: tf.variable(tf.randomUniform([nEmbd, nHead * headDim], -s, s), true, `layer${i}_q`),
-          kWeight: tf.variable(tf.randomUniform([nEmbd, kvDim], -s, s), true, `layer${i}_k`),
-          vWeight: tf.variable(tf.randomUniform([nEmbd, kvDim], -s, s), true, `layer${i}_v`),
-          projWeight: tf.variable(tf.zeros([nEmbd, nEmbd]), true, `layer${i}_proj`),
-          fcWeight: tf.variable(tf.randomUniform([nEmbd, 4 * nEmbd], -s, s), true, `layer${i}_fc`),
-          mlpProjWeight: tf.variable(tf.zeros([4 * nEmbd, nEmbd]), true, `layer${i}_mlp_proj`),
+          qWeight: tf.variable(tf.randomStandardNormal([nEmbd, nHead * headDim]).mul(std), true, `layer${i}_q`),
+          kWeight: tf.variable(tf.randomStandardNormal([nEmbd, kvDim]).mul(std), true, `layer${i}_k`),
+          vWeight: tf.variable(tf.randomStandardNormal([nEmbd, kvDim]).mul(std), true, `layer${i}_v`),
+          projWeight: tf.variable(tf.randomStandardNormal([nEmbd, nEmbd]).mul(projStd), true, `layer${i}_proj`),
+          fcWeight: tf.variable(tf.randomStandardNormal([nEmbd, 4 * nEmbd]).mul(std), true, `layer${i}_fc`),
+          mlpProjWeight: tf.variable(tf.randomStandardNormal([4 * nEmbd, nEmbd]).mul(projStd), true, `layer${i}_mlp_proj`),
         });
       }
 
@@ -200,19 +205,17 @@ export class GPTModel {
       // targets is [B, T], flatten to [B*T]
       const flatTargets = targets.reshape([-1]);
       
-      // Only compute loss where target != -1
-      // TFJS sparseCategoricalCrossentropy handles integer labels
       const validMask = flatTargets.notEqual(-1);
       
-      // To cleanly mask, we use gather to fetch only valid elements
-      // For simplicity in a custom training loop, tf.losses.softmaxCrossEntropy handles one-hot,
-      // but sparseCategoricalCrossentropy is better for integer targets.
-      // We will cast targets to oneHot for simplicity right now.
-      const oneHotTargets = tf.oneHot(tf.cast(flatTargets, 'int32'), this.config.vocabSize);
+      // Explicit mathematically-exact CCE to match PyTorch reduction semantics
+      const oneHotTargets = tf.oneHot(tf.cast(tf.relu(flatTargets), 'int32'), this.config.vocabSize);
       
-      // tf.losses.softmaxCrossEntropy averages over the batch automatically
-      // We apply validMask manually
-      const cce = tf.losses.softmaxCrossEntropy(oneHotTargets, logits, tf.cast(validMask, 'float32'), tf.Reduction.MEAN);
+      const probs = tf.softmax(logits, -1);
+      const logProbs = tf.log(probs.add(1e-10));
+      const unreducedLoss = tf.neg(tf.sum(oneHotTargets.mul(logProbs), -1));
+      
+      const maskedLoss = unreducedLoss.mul(tf.cast(validMask, 'float32'));
+      const cce = tf.mean(maskedLoss);
       
       if (returnLogits) {
         return { loss: cce as tf.Scalar, logits };
@@ -232,5 +235,24 @@ export class GPTModel {
       vars.push(layer.qWeight, layer.kWeight, layer.vWeight, layer.projWeight, layer.fcWeight, layer.mlpProjWeight);
     }
     return vars;
+  }
+
+  getTrainableVariablesByName(): Record<string, tf.Variable> {
+    const map: Record<string, tf.Variable> = {
+      wte: this.wte,
+      lmHead: this.lmHead,
+      residLambdas: this.residLambdas,
+      x0Lambdas: this.x0Lambdas,
+    };
+    for (let i = 0; i < this.layers.length; i++) {
+      const layer = this.layers[i];
+      map[`layer${i}_q`] = layer.qWeight;
+      map[`layer${i}_k`] = layer.kWeight;
+      map[`layer${i}_v`] = layer.vWeight;
+      map[`layer${i}_proj`] = layer.projWeight;
+      map[`layer${i}_fc`] = layer.fcWeight;
+      map[`layer${i}_mlp_proj`] = layer.mlpProjWeight;
+    }
+    return map;
   }
 }

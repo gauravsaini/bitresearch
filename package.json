@@ -13,6 +13,7 @@
     "start": "node dist/server/index.js"
   },
   "dependencies": {
+    "@petamoriken/float16": "^3.9.3",
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-backend-webgpu": "^4.22.0",
     "cors": "^2.8.5",

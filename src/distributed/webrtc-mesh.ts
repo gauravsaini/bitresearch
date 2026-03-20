@@ -1,6 +1,9 @@
 // WebRTC Peer-to-Peer Mesh — forms a ring topology for distributed all-reduce
 // Each peer connects to its left and right neighbors in the ring.
+// Each peer connects to its left and right neighbors in the ring.
 // Gradients flow around the ring in O(N) steps for N workers.
+
+import { Float16Array } from '@petamoriken/float16';
 
 export type PeerState = 'new' | 'connecting' | 'connected' | 'disconnected' | 'failed';
 
@@ -33,9 +36,6 @@ const RTC_CONFIG: RTCConfiguration = {
     { urls: 'stun:stun1.l.google.com:19302' },
   ],
 };
-
-// Maximum message size for WebRTC data channels (64KB is safe across browsers)
-const MAX_CHUNK_SIZE = 64 * 1024;
 
 export class WebRTCMesh {
   private peers = new Map<string, PeerInfo>();
@@ -398,11 +398,14 @@ export class WebRTCMesh {
     // 0 = gradient chunk, 1 = ping, 2 = pong, 3 = sync barrier
 
     if (msgType === 0) {
-      // Gradient chunk: [type(1) | phase(1) | chunkIndex(u32) | stepId(u32) | data(f32[])]
+      // Gradient chunk: [type(1) | phase(1) | chunkIndex(u32) | stepId(u32) | data(f16[])]
       const phase = view.getUint8(1) === 0 ? 'scatter' : 'gather';
       const chunkIndex = view.getUint32(2, true);
       // const stepId = view.getUint32(6, true);
-      const gradientData = new Float32Array(data, 12);
+      
+      // Decompress f16 back to f32 for accurate math
+      const f16Gradients = new Float16Array(data, 12);
+      const gradientData = new Float32Array(f16Gradients);
 
       this.onGradientsReceived?.(fromPeerId, gradientData, chunkIndex, phase as 'scatter' | 'gather');
     } else if (msgType === 1) {
@@ -424,17 +427,9 @@ export class WebRTCMesh {
     }
 
     try {
-      // If data exceeds max chunk size, split it
-      if (data.byteLength <= MAX_CHUNK_SIZE) {
-        peer.sendChannel.send(data);
-      } else {
-        // Split into chunks
-        const uint8 = new Uint8Array(data);
-        for (let offset = 0; offset < uint8.byteLength; offset += MAX_CHUNK_SIZE) {
-          const end = Math.min(offset + MAX_CHUNK_SIZE, uint8.byteLength);
-          peer.sendChannel.send(uint8.slice(offset, end).buffer);
-        }
-      }
+      // Modern browsers natively support large SCTP messages.
+      // (Chrome: 256MB, Firefox: 1GB). Avoid buggy manual chunking.
+      peer.sendChannel.send(data);
       peer.bytesSent += data.byteLength;
       return true;
     } catch (e) {
@@ -453,8 +448,12 @@ export class WebRTCMesh {
     if (!this.ring) return false;
 
     const targetPeerId = this.ring.rightPeerId;
-    const headerSize = 12;
-    const buf = new ArrayBuffer(headerSize + gradients.byteLength);
+    
+    // Bandwidth halving: Quantize f32 gradients to f16
+    const f16Gradients = new Float16Array(gradients);
+    
+    const headerSize = 12; // 2-byte aligned for Float16Array compatibility (12 % 2 == 0)
+    const buf = new ArrayBuffer(headerSize + f16Gradients.byteLength);
     const view = new DataView(buf);
 
     view.setUint8(0, 0); // type = gradient chunk
@@ -462,7 +461,8 @@ export class WebRTCMesh {
     view.setUint32(2, chunkIndex, true);
     view.setUint32(6, stepId, true);
 
-    new Float32Array(buf, headerSize).set(gradients);
+    // Copy underlying bytes of the compressed f16 array
+    new Uint16Array(buf, headerSize).set(new Uint16Array(f16Gradients.buffer));
 
     return this.sendToPeer(targetPeerId, buf);
   }
