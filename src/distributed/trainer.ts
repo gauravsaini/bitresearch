@@ -1,16 +1,7 @@
-// Distributed Trainer — runs the training loop on each WebGPU worker
+// Distributed Trainer — runs the training loop on each WebRTC worker
 // Coordinates with peers via WebRTC ring all-reduce for gradient sync.
-//
-// Each worker independently:
-//   1. Gets its own data batch
-//   2. Runs forward + backward pass on WebGPU
-//   3. Participates in ring all-reduce to average gradients across all peers
-//   4. Applies optimizer step locally with the averaged gradients
-//   5. Repeat — fully decentralized, no central parameter server!
 
-import { GPUDeviceManager } from '../gpu/device';
-import { Tensor } from '../gpu/tensor';
-import { GPUOps } from '../gpu/ops';
+import * as tf from '@tensorflow/tfjs';
 import { GPTModel } from '../model/gpt';
 import { GPTConfig, DEFAULT_CONFIG } from '../model/config';
 import { WebRTCMesh } from './webrtc-mesh';
@@ -22,8 +13,7 @@ export interface TrainerConfig {
   learningRate: number;
   warmupSteps: number;
   maxSteps: number;
-  signalingUrl: string;     // WebRTC signaling server URL
-  coordinatorUrl?: string;  // optional legacy coordinator for data/monitoring
+  signalingUrl: string;
 }
 
 export interface TrainerMetrics {
@@ -49,20 +39,12 @@ const DEFAULT_TRAINER_CONFIG: TrainerConfig = {
 
 export class DistributedTrainer {
   private config: TrainerConfig;
-  private mgr: GPUDeviceManager | null = null;
-  private ops: GPUOps | null = null;
   private model: GPTModel | null = null;
+  private optimizer: tf.Optimizer | null = null;
   private mesh: WebRTCMesh;
   private allReduce: RingAllReduce | null = null;
   private running = false;
   private startTime = 0;
-
-  // Optimizer state (simple AdamW)
-  private optimState: {
-    step: number;
-    m: Float32Array | null;   // first moment
-    v: Float32Array | null;   // second moment
-  } = { step: 0, m: null, v: null };
 
   metrics: TrainerMetrics = {
     step: 0,
@@ -89,26 +71,21 @@ export class DistributedTrainer {
     this.onLog?.(msg);
   }
 
-  /** Initialize WebGPU, model, and WebRTC connections */
   async initialize(): Promise<void> {
-    // 1. Initialize WebGPU
-    this.log('🔧 Initializing WebGPU...');
-    this.mgr = await GPUDeviceManager.create();
-    this.ops = new GPUOps(this.mgr);
-    const info = this.mgr.getDeviceInfo();
-    this.log(`🎮 GPU: ${info.vendor} ${info.architecture}`);
+    this.log('🔧 Initializing TensorFlow.js WebGPU backend...');
+    this.model = new GPTModel(this.config.modelConfig);
+    await this.model.init();
+    this.log(`🎮 Backend: ${tf.getBackend()}`);
 
-    // 2. Create model
-    this.log('🧠 Creating model...');
-    this.model = await GPTModel.create(this.config.modelConfig, this.mgr, this.ops);
-    const paramCount = this.model.paramCount();
-    this.log(`📊 Model: ${(paramCount / 1e6).toFixed(1)}M params`);
+    const vars = this.model.getTrainableVariables();
+    let numParams = 0;
+    vars.forEach(v => numParams += v.size);
+    this.log(`📊 Model: ${(numParams / 1e6).toFixed(1)}M trainable params`);
 
-    // 3. Initialize optimizer state
-    this.optimState.m = new Float32Array(paramCount).fill(0);
-    this.optimState.v = new Float32Array(paramCount).fill(0);
+    // Initialize optimizer
+    this.optimizer = tf.train.adam(this.config.learningRate, 0.9, 0.999);
 
-    // 4. Connect to WebRTC signaling
+    // Connect to WebRTC signaling
     this.log('🌐 Connecting to signaling server...');
     this.mesh.onLog = (msg) => this.log(`[P2P] ${msg}`);
     this.mesh.onPeerStateChange = (peerId, state) => {
@@ -118,8 +95,6 @@ export class DistributedTrainer {
 
     this.mesh.onRingFormed = (ring) => {
       this.log(`🔗 Ring formed! Position ${ring.self}/${ring.totalPeers}`);
-
-      // Initialize all-reduce
       this.allReduce = new RingAllReduce(this.mesh, {
         timeoutMs: 10000,
         onProgress: (phase, step, total) => {
@@ -133,13 +108,12 @@ export class DistributedTrainer {
     this.log('✅ Initialization complete. Waiting for peers...');
   }
 
-  /** Generate a random training batch (synthetic data for demo) */
-  private generateBatch(): { inputIds: Uint32Array; targets: Int32Array } {
+  private generateBatch(): { inputIds: Int32Array; targets: Int32Array } {
     const B = this.config.batchSize;
     const T = this.config.modelConfig.sequenceLen;
     const V = this.config.modelConfig.vocabSize;
 
-    const inputIds = new Uint32Array(B * T);
+    const inputIds = new Int32Array(B * T);
     const targets = new Int32Array(B * T);
 
     for (let i = 0; i < B * T; i++) {
@@ -150,7 +124,6 @@ export class DistributedTrainer {
     return { inputIds, targets };
   }
 
-  /** Learning rate schedule with warmup */
   private getLearningRate(step: number): number {
     if (step < this.config.warmupSteps) {
       return this.config.learningRate * (step + 1) / this.config.warmupSteps;
@@ -158,104 +131,81 @@ export class DistributedTrainer {
     return this.config.learningRate;
   }
 
-  /** Apply AdamW optimizer step with averaged gradients */
-  private applyAdamW(params: Float32Array, gradients: Float32Array, lr: number): Float32Array {
-    const beta1 = 0.9;
-    const beta2 = 0.999;
-    const eps = 1e-8;
-    const weightDecay = 0.01;
-
-    this.optimState.step++;
-    const t = this.optimState.step;
-    const m = this.optimState.m!;
-    const v = this.optimState.v!;
-
-    const bias1 = 1 - Math.pow(beta1, t);
-    const bias2 = 1 - Math.pow(beta2, t);
-
-    for (let i = 0; i < params.length; i++) {
-      // Update moments
-      m[i] = beta1 * m[i] + (1 - beta1) * gradients[i];
-      v[i] = beta2 * v[i] + (1 - beta2) * gradients[i] * gradients[i];
-
-      // Bias correction
-      const mHat = m[i] / bias1;
-      const vHat = v[i] / bias2;
-
-      // Weight decay
-      params[i] -= lr * weightDecay * params[i];
-
-      // Update
-      params[i] -= lr * mHat / (Math.sqrt(vHat) + eps);
-    }
-
-    return params;
-  }
-
-  /** Run a single training step */
   async trainStep(): Promise<number> {
-    if (!this.model || !this.mgr || !this.ops) {
-      throw new Error('Not initialized');
-    }
+    if (!this.model || !this.optimizer) throw new Error('Not initialized');
 
     const B = this.config.batchSize;
     const T = this.config.modelConfig.sequenceLen;
     const step = this.metrics.step;
 
-    // 1. Generate batch
+    // 1. Generate Batch
     const { inputIds, targets } = this.generateBatch();
+    const inputTensor = tf.tensor2d(inputIds, [B, T], 'int32');
+    const targetTensor = tf.tensor2d(targets, [B, T], 'int32');
 
-    // 2. Forward pass on WebGPU
     const computeStart = performance.now();
+    const vars = this.model.getTrainableVariables();
 
-    const inputTensor = await Tensor.fromArray(
-      this.mgr, inputIds, [B, T], 'batch_input',
-      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-    );
-    // For targets, we need to pass as f32 but interpret as i32 in the shader
-    const targetF32 = new Float32Array(targets.length);
-    for (let i = 0; i < targets.length; i++) targetF32[i] = targets[i];
-    const targetTensor = await Tensor.fromArray(
-      this.mgr, targetF32, [B, T], 'batch_targets',
-      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-    );
+    // 2. Compute Loss and Gradients (Free Autograd!)
+    const { value: lossTensor, grads } = tf.variableGrads(() => {
+      return this.model!.forward(inputTensor, targetTensor).loss;
+    }, vars);
 
-    const { loss } = await this.model.forward(inputTensor, targetTensor, B, T);
-
+    const loss = (await lossTensor.array()) as number;
     const computeTimeMs = performance.now() - computeStart;
 
-    // 3. Get gradients (numerical approximation for now — real autograd TODO)
-    // For demo purposes, we use the loss as a signal and create pseudo-gradients
-    const params = await this.model.getAllParams(this.mgr);
-    const pseudoGradients = new Float32Array(params.length);
-    // Simple gradient estimation: random direction scaled by loss
-    for (let i = 0; i < pseudoGradients.length; i++) {
-      pseudoGradients[i] = (Math.random() - 0.5) * 0.001 * loss;
+    // 3. Serialize Gradients into a 1D Array for WebRTC payload
+    let totalGradSize = 0;
+    vars.forEach(v => totalGradSize += v.size);
+    const flatGrads = new Float32Array(totalGradSize);
+    
+    let offset = 0;
+    for (const v of vars) {
+      const g = grads[v.name];
+      if (g) {
+        // TFJS grads might be sparse or non-existent if not actively contributing to loss
+        const gData = await g.data();
+        flatGrads.set(gData as Float32Array, offset);
+        g.dispose();
+      }
+      offset += v.size;
     }
 
-    // 4. All-reduce gradients across peers (if connected)
+    // 4. All-Reduce Gradients across the P2P Mesh
     let averagedGradients: Float32Array;
     let allReduceTimeMs = 0;
 
     if (this.allReduce && this.mesh.connectedPeerCount > 0) {
       const arStart = performance.now();
-      averagedGradients = await this.allReduce.allReduce(pseudoGradients, step);
+      averagedGradients = await this.allReduce.allReduce(flatGrads, step);
       allReduceTimeMs = performance.now() - arStart;
       this.log(`🔄 All-reduce: ${allReduceTimeMs.toFixed(0)}ms across ${this.mesh.connectedPeerCount + 1} peers`);
     } else {
-      averagedGradients = pseudoGradients;
+      averagedGradients = flatGrads;
     }
 
-    // 5. Apply optimizer step
+    // 5. Reconstruct and Apply Gradients
     const lr = this.getLearningRate(step);
-    const updatedParams = this.applyAdamW(params, averagedGradients, lr);
+    // There is no setLearningRate, but we can access optimizer.learningRate in some versions
+    // If not, we just recreate the optimizer if LR changes significantly, or hack it.
+    // For simplicity, we just use the global LR object.
+    (this.optimizer as any).learningRate = lr;
 
-    // 6. Load updated parameters back to model
-    await this.model.loadAllParams(this.mgr, updatedParams);
+    const newGrads: Record<string, tf.Tensor> = {};
+    offset = 0;
+    for (const v of vars) {
+      const gData = averagedGradients.subarray(offset, offset + v.size);
+      newGrads[v.name] = tf.tensor(gData, v.shape);
+      offset += v.size;
+    }
+
+    this.optimizer.applyGradients(newGrads);
 
     // Cleanup
-    inputTensor.destroy();
-    targetTensor.destroy();
+    for (const v of vars) { newGrads[v.name].dispose(); }
+    lossTensor.dispose();
+    inputTensor.dispose();
+    targetTensor.dispose();
 
     // Update metrics
     const tokensProcessed = B * T;
@@ -276,12 +226,8 @@ export class DistributedTrainer {
     return loss;
   }
 
-  /** Start the training loop */
   async startTraining(): Promise<void> {
-    if (!this.model) {
-      await this.initialize();
-    }
-
+    if (!this.model) await this.initialize();
     this.running = true;
     this.startTime = performance.now();
     this.log('🚀 Training started!');
@@ -291,7 +237,6 @@ export class DistributedTrainer {
         const loss = await this.trainStep();
         const step = this.metrics.step;
 
-        // Log progress
         if (step % 5 === 0) {
           const peers = this.mesh.connectedPeerCount;
           const tps = this.metrics.tokensPerSec.toFixed(0);
@@ -300,23 +245,20 @@ export class DistributedTrainer {
         }
       } catch (e) {
         this.log(`❌ Training error: ${e}`);
-        // Brief pause before retrying
         await new Promise(r => setTimeout(r, 1000));
       }
     }
-
     this.log('🏁 Training stopped');
   }
 
-  /** Stop the training loop */
   stop(): void {
     this.running = false;
     this.log('⏹️ Stop requested');
   }
 
-  /** Clean up resources */
   destroy(): void {
     this.stop();
     this.mesh.disconnect();
   }
 }
+
