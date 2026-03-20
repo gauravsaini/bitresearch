@@ -1,6 +1,6 @@
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgpu';
-import { GPTConfig, computeWindowSizes } from './config';
+import { GPTConfig, computeWindowSizes, hasValueEmbedding } from './config';
 
 export interface LayerWeights {
   qWeight: tf.Variable;
@@ -9,9 +9,13 @@ export interface LayerWeights {
   projWeight: tf.Variable;
   fcWeight: tf.Variable;
   mlpProjWeight: tf.Variable;
+  valueEmbedWeight?: tf.Variable;
+  veGateWeight?: tf.Variable;
 }
 
 export class GPTModel {
+  private static readonly VE_GATE_CHANNELS = 32;
+
   config: GPTConfig;
   wte!: tf.Variable;
   lmHead!: tf.Variable;
@@ -40,40 +44,60 @@ export class GPTModel {
     await tf.ready();
 
     const { vocabSize, nLayer, nHead, nKvHead, nEmbd, sequenceLen } = this.config;
+    if (nEmbd % nHead !== 0) {
+      throw new Error(`nEmbd (${nEmbd}) must be divisible by nHead (${nHead})`);
+    }
+    if (nKvHead <= 0 || nHead % nKvHead !== 0) {
+      throw new Error(`nKvHead (${nKvHead}) must be a positive divisor of nHead (${nHead})`);
+    }
     const headDim = nEmbd / nHead;
+    if (headDim % 2 !== 0) {
+      throw new Error(`head dimension (${headDim}) must be even for RoPE`);
+    }
+    if (nEmbd < GPTModel.VE_GATE_CHANNELS) {
+      throw new Error(`nEmbd (${nEmbd}) must be at least ${GPTModel.VE_GATE_CHANNELS} for ve_gate`);
+    }
     const kvDim = nKvHead * headDim;
-    
-    // PyTorch GPT-2 standard initialization parity
-    const std = 0.02;
-    const projStd = 0.02 / Math.sqrt(2 * nLayer);
 
     tf.tidy(() => {
-      this.wte = tf.variable(tf.randomStandardNormal([vocabSize, nEmbd]).mul(std), true, 'wte');
-      this.lmHead = tf.variable(tf.randomStandardNormal([vocabSize, nEmbd]).mul(std), true, 'lmHead');
-      
+      this.wte = tf.variable(tf.randomStandardNormal([vocabSize, nEmbd]).mul(0.02), true, 'wte');
+      this.lmHead = tf.variable(tf.randomStandardNormal([vocabSize, nEmbd]).mul(0.02), true, 'lmHead');
+
       this.residLambdas = tf.variable(tf.ones([nLayer]), true, 'residLambdas');
       this.x0Lambdas = tf.variable(tf.fill([nLayer], 0.1), true, 'x0Lambdas');
 
       for (let i = 0; i < nLayer; i++) {
-        this.layers.push({
-          qWeight: tf.variable(tf.randomStandardNormal([nEmbd, nHead * headDim]).mul(std), true, `layer${i}_q`),
-          kWeight: tf.variable(tf.randomStandardNormal([nEmbd, kvDim]).mul(std), true, `layer${i}_k`),
-          vWeight: tf.variable(tf.randomStandardNormal([nEmbd, kvDim]).mul(std), true, `layer${i}_v`),
-          projWeight: tf.variable(tf.randomStandardNormal([nEmbd, nEmbd]).mul(projStd), true, `layer${i}_proj`),
-          fcWeight: tf.variable(tf.randomStandardNormal([nEmbd, 4 * nEmbd]).mul(std), true, `layer${i}_fc`),
-          mlpProjWeight: tf.variable(tf.randomStandardNormal([4 * nEmbd, nEmbd]).mul(projStd), true, `layer${i}_mlp_proj`),
-        });
+        const layer: LayerWeights = {
+          qWeight: tf.variable(tf.randomStandardNormal([nEmbd, nHead * headDim]).mul(0.02), true, `layer${i}_q`),
+          kWeight: tf.variable(tf.randomStandardNormal([nEmbd, kvDim]).mul(0.02), true, `layer${i}_k`),
+          vWeight: tf.variable(tf.randomStandardNormal([nEmbd, kvDim]).mul(0.02), true, `layer${i}_v`),
+          projWeight: tf.variable(tf.zeros([nEmbd, nEmbd]), true, `layer${i}_proj`),
+          fcWeight: tf.variable(tf.randomStandardNormal([nEmbd, 4 * nEmbd]).mul(0.02), true, `layer${i}_fc`),
+          mlpProjWeight: tf.variable(tf.zeros([4 * nEmbd, nEmbd]), true, `layer${i}_mlp_proj`),
+        };
+        if (hasValueEmbedding(i, nLayer)) {
+          layer.valueEmbedWeight = tf.variable(
+            tf.randomStandardNormal([vocabSize, kvDim]).mul(0.02),
+            true,
+            `layer${i}_value_embed`,
+          );
+          layer.veGateWeight = tf.variable(
+            tf.zeros([GPTModel.VE_GATE_CHANNELS, nKvHead]),
+            true,
+            `layer${i}_ve_gate`,
+          );
+        }
+        this.layers.push(layer);
       }
 
       // Precompute RoPE (simplified rotary embedding)
       const invFreq = tf.div(1.0, tf.pow(10000.0, tf.div(tf.range(0, headDim, 2), headDim))) as tf.Tensor1D;
       const t = tf.range(0, sequenceLen);
       const freqs = tf.outerProduct(t, invFreq);
-      const emb = tf.concat([freqs, freqs], -1);
-      
+
       // We keep these as tensors, not variables, since they don't train
-      this.cosTable = tf.keep(tf.cos(emb));
-      this.sinTable = tf.keep(tf.sin(emb));
+      this.cosTable = tf.keep(tf.cos(freqs));
+      this.sinTable = tf.keep(tf.sin(freqs));
     });
   }
 
@@ -93,24 +117,26 @@ export class GPTModel {
    * Applies Rotary Positional Embeddings
    * x: [B, T, num_heads, head_dim]
    */
-  private applyRotary(x: tf.Tensor, isK: boolean = false): tf.Tensor {
+  private applyRotary(x: tf.Tensor): tf.Tensor {
     return tf.tidy(() => {
       const [B, T, numHeads, headDim] = x.shape;
+      const halfDim = headDim / 2;
       
-      // Split into half (x1, x2) for rotary
-      const x1 = x.slice([0, 0, 0, 0], [B, T, numHeads, headDim / 2]);
-      const x2 = x.slice([0, 0, 0, headDim / 2], [B, T, numHeads, headDim / 2]);
-      
-      // rotated x: [-x2, x1]
-      const halfRotated = tf.concat([tf.neg(x2), x1], -1);
-      
-      // Broadcast cos and sin to [B, T, numHeads, headDim]
-      // Current cosTable is [T, headDim]. Needs reshape to [1, T, 1, headDim] for broadcast
-      const sliceLen = T;
-      const cos = this.cosTable.slice([0, 0], [sliceLen, -1]).reshape([1, T, 1, headDim]);
-      const sin = this.sinTable.slice([0, 0], [sliceLen, -1]).reshape([1, T, 1, headDim]);
-      
-      return x.mul(cos).add(halfRotated.mul(sin));
+      const x1 = x.slice([0, 0, 0, 0], [B, T, numHeads, halfDim]);
+      const x2 = x.slice([0, 0, 0, halfDim], [B, T, numHeads, halfDim]);
+      const cos = this.cosTable.slice([0, 0], [T, -1]).reshape([1, T, 1, halfDim]);
+      const sin = this.sinTable.slice([0, 0], [T, -1]).reshape([1, T, 1, halfDim]);
+      const y1 = x1.mul(cos).add(x2.mul(sin));
+      const y2 = x1.mul(sin.neg()).add(x2.mul(cos));
+      return tf.concat([y1, y2], -1);
+    });
+  }
+
+  private buildAttentionMask(seqLen: number, windowSize: [number, number]): tf.Tensor {
+    return tf.tidy(() => {
+      const [left, right] = windowSize;
+      const allowed = tf.linalg.bandPart(tf.ones([seqLen, seqLen]), left, right);
+      return allowed.sub(1).mul(1e9);
     });
   }
 
@@ -122,6 +148,7 @@ export class GPTModel {
       const [B, T] = inputIds.shape;
       const { nEmbd, nLayer, nHead, nKvHead } = this.config;
       const headDim = nEmbd / nHead;
+      const kvGroupSize = nHead / nKvHead;
 
       // 1. Token embeddings: [B, T] -> [B, T, D]
       let x = tf.gather(this.wte, inputIds);
@@ -129,9 +156,6 @@ export class GPTModel {
       
       const x0 = xNorm;
       let current = xNorm;
-
-      // Causal mask: [T, T], where upper triangle is -1e9
-      const mask = tf.linalg.bandPart(tf.ones([T, T]), -1, 0).sub(1).mul(1e9);
 
       // 2. Transformer blocks
       for (let i = 0; i < nLayer; i++) {
@@ -151,23 +175,37 @@ export class GPTModel {
         let q = flatNorm.matMul(layer.qWeight).reshape([B, T, nHead, headDim]);
         let k = flatNorm.matMul(layer.kWeight).reshape([B, T, nKvHead, headDim]);
         let v = flatNorm.matMul(layer.vWeight).reshape([B, T, nKvHead, headDim]);
+
+        if (layer.valueEmbedWeight && layer.veGateWeight) {
+          const ve = tf.gather(layer.valueEmbedWeight, inputIds).reshape([B, T, nKvHead, headDim]);
+          const gateInput = preNorm.slice([0, 0, 0], [B, T, GPTModel.VE_GATE_CHANNELS]);
+          const gate = tf.sigmoid(
+            gateInput.reshape([B * T, GPTModel.VE_GATE_CHANNELS]).matMul(layer.veGateWeight)
+          ).mul(2).reshape([B, T, nKvHead, 1]);
+          v = v.add(ve.mul(gate));
+        }
         
         // Apply RoPE
         q = this.applyRotary(q);
-        k = this.applyRotary(k, true);
+        k = this.applyRotary(k);
         
         // RMSNorm on Q and K (head-wise)
         q = this.rmsNorm(q);
         k = this.rmsNorm(k);
+
+        if (kvGroupSize > 1) {
+          k = k.reshape([B, T, nKvHead, 1, headDim]).tile([1, 1, 1, kvGroupSize, 1]).reshape([B, T, nHead, headDim]);
+          v = v.reshape([B, T, nKvHead, 1, headDim]).tile([1, 1, 1, kvGroupSize, 1]).reshape([B, T, nHead, headDim]);
+        }
         
         // Transpose for attention -> [B, nHead, T, headDim]
         q = q.transpose([0, 2, 1, 3]);
         k = k.transpose([0, 2, 1, 3]);
         v = v.transpose([0, 2, 1, 3]);
-        
-        // Causal Attention: softmax(Q*K^T / sqrt(d) + mask) * V
+
+        // Causal/local Attention: softmax(Q*K^T / sqrt(d) + mask) * V
         const scores = tf.matMul(q, k, false, true).div(Math.sqrt(headDim));
-        const maskedScores = scores.add(mask.reshape([1, 1, T, T]));
+        const maskedScores = scores.add(this.buildAttentionMask(T, this.windowSizes[i]).reshape([1, 1, T, T]));
         const probs = tf.softmax(maskedScores, -1);
         let attnOut = tf.matMul(probs, v);
         
@@ -233,6 +271,12 @@ export class GPTModel {
     ];
     for (const layer of this.layers) {
       vars.push(layer.qWeight, layer.kWeight, layer.vWeight, layer.projWeight, layer.fcWeight, layer.mlpProjWeight);
+      if (layer.valueEmbedWeight) {
+        vars.push(layer.valueEmbedWeight);
+      }
+      if (layer.veGateWeight) {
+        vars.push(layer.veGateWeight);
+      }
     }
     return vars;
   }
@@ -252,6 +296,12 @@ export class GPTModel {
       map[`layer${i}_proj`] = layer.projWeight;
       map[`layer${i}_fc`] = layer.fcWeight;
       map[`layer${i}_mlp_proj`] = layer.mlpProjWeight;
+      if (layer.valueEmbedWeight) {
+        map[`layer${i}_value_embed`] = layer.valueEmbedWeight;
+      }
+      if (layer.veGateWeight) {
+        map[`layer${i}_ve_gate`] = layer.veGateWeight;
+      }
     }
     return map;
   }
