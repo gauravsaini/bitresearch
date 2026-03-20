@@ -46,14 +46,16 @@ const DEFAULT_TRAINER_CONFIG: TrainerConfig = {
 };
 
 export class DistributedTrainer {
-  private config: TrainerConfig;
+  config: TrainerConfig;
   private model: GPTModel | null = null;
   private optimizer: tf.Optimizer | null = null;
   private mesh: WebRTCMesh;
   private allReduce: RingAllReduce | null = null;
   private dataLoader: TokenDataLoader | null = null;
+  private valTokens: Int32Array | null = null;
   private running = false;
   private startTime = 0;
+  valBpb: number = 0;
 
   metrics: TrainerMetrics = {
     step: 0,
@@ -101,7 +103,9 @@ export class DistributedTrainer {
       try {
         this.dataLoader = new TokenDataLoader(this.config.dataUrl, this.config.modelConfig.vocabSize);
         await this.dataLoader.load();
-        this.log(`📦 Loaded ${(this.dataLoader.numTokens / 1e3).toFixed(0)}K tokens`);
+        const totalTokens = this.dataLoader.numTokens;
+        this.valTokens = this.dataLoader.valSplit(0.1);
+        this.log(`📦 Loaded ${(totalTokens / 1e3).toFixed(0)}K tokens — ${(this.dataLoader.numTokens / 1e3).toFixed(0)}K train, ${(this.valTokens.length / 1e3).toFixed(0)}K val`);
       } catch (e) {
         this.log(`⚠️ Failed to load data, falling back to synthetic: ${e}`);
         this.dataLoader = null;
@@ -372,6 +376,48 @@ export class DistributedTrainer {
     this.onMetricsUpdate?.(this.metrics);
 
     return loss;
+  }
+
+  /**
+   * Evaluate validation bits per byte (BPB).
+   * Runs forward-only passes on held-out validation tokens, computes mean cross-entropy,
+   * then converts nats → bits → per-byte. Mirrors Karpathy's evaluate_bpb() in prepare.py.
+   * Default avgBytesPerToken=1.0 is a conservative approximation for SentencePiece tokens.
+   */
+  async evaluateBpb(batchSize?: number, numBatches = 10, avgBytesPerToken = 1.0): Promise<number> {
+    if (!this.model || !this.valTokens || this.valTokens.length === 0) {
+      return 0;
+    }
+
+    const B = batchSize ?? this.config.batchSize;
+    const T = this.config.modelConfig.sequenceLen;
+    let totalLoss = 0;
+    const maxOffset = this.valTokens.length - B * T;
+    if (maxOffset <= 0) return 0;
+
+    for (let b = 0; b < numBatches; b++) {
+      const offset = Math.floor(Math.random() * maxOffset);
+      const { inputIds, targets } = TokenDataLoader.batchFromArray(this.valTokens, B, T, offset);
+
+      const inputTensor = tf.tensor2d(inputIds, [B, T], 'int32');
+      const targetTensor = tf.tensor2d(targets, [B, T], 'int32');
+
+      const lossVal = tf.tidy(() => {
+        const lossTensor = this.model!.forward(inputTensor, targetTensor).loss;
+        return (lossTensor.dataSync() as Float32Array)[0];
+      });
+
+      totalLoss += lossVal;
+      inputTensor.dispose();
+      targetTensor.dispose();
+    }
+
+    const meanNats = totalLoss / numBatches;
+    // bpb = mean_nats / (ln(2) * avg_bytes_per_token)
+    // With avgBytesPerToken=1.0, this is just nats → bits conversion
+    this.valBpb = meanNats / (Math.log(2) * avgBytesPerToken);
+    this.log(`📊 val_bpb: ${this.valBpb.toFixed(6)} (mean_loss=${meanNats.toFixed(6)}, ${numBatches} batches)`);
+    return this.valBpb;
   }
 
   async startTraining(): Promise<void> {

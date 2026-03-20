@@ -44,4 +44,28 @@ export class TokenDataLoader {
 
     return { inputIds, targets, epoch: this.epochs };
   }
+
+  /** Split tokens into train (first 90%) and val (last 10%). Returns val tokens. */
+  valSplit(ratio = 0.1): Int32Array {
+    const splitIdx = Math.floor(this.tokens.length * (1 - ratio));
+    const valTokens = this.tokens.slice(splitIdx);
+    // Trim training cursor to train-only range
+    this.tokens = this.tokens.subarray(0, splitIdx);
+    this.pos = 0;
+    return valTokens;
+  }
+
+  /** Generate a batch from a fixed token array (for validation). */
+  static batchFromArray(tokens: Int32Array, batchSize: number, seqLen: number, offset: number): { inputIds: Int32Array; targets: Int32Array } {
+    const needed = batchSize * seqLen;
+    const inputIds = new Int32Array(needed);
+    const targets = new Int32Array(needed);
+    for (let i = 0; i < needed; i++) {
+      const idx = (offset + i) % tokens.length;
+      inputIds[i] = tokens[idx];
+      const nextIdx = (offset + i + 1) % tokens.length;
+      targets[i] = tokens[nextIdx];
+    }
+    return { inputIds, targets };
+  }
 }

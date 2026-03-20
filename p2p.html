@@ -571,6 +571,7 @@
   <script type="module">
     import { DistributedTrainer } from '/src/distributed/trainer.ts';
     import { Dashboard } from '/src/client/dashboard.ts';
+    import { estimateParams } from '/src/model/config.ts';
 
     // ── URL Param Parsing ───────────────────────────────────────
     const params = new URLSearchParams(window.location.search);
@@ -758,12 +759,12 @@
         if (maxSteps !== Infinity && m.step >= maxSteps) {
           addLog(`🏁 Reached maxSteps=${maxSteps}, stopping.`, 'train');
           trainer.stop();
-          printSummary(m);
+          trainer.evaluateBpb().then(() => printSummary(m));
         }
         if (maxSeconds !== Infinity && m.elapsedSeconds >= maxSeconds) {
           addLog(`🏁 Reached maxSeconds=${maxSeconds}, stopping.`, 'train');
           trainer.stop();
-          printSummary(m);
+          trainer.evaluateBpb().then(() => printSummary(m));
         }
       };
 
@@ -792,15 +793,34 @@
       }
     }
 
+    function computeMFU(numParams, seqLen, batchSize, numSteps, trainingSecs) {
+      // Approximate: 6 FLOPs per param per token (fwd + bwd)
+      // Conservative WebGPU TFLOPS estimate
+      const PEAK_TFLOPS = 10; // approximate — adjust per known GPU
+      const flopsPerStep = 6 * numParams * seqLen * batchSize;
+      const achievedFlopsPerSec = (flopsPerStep * numSteps) / trainingSecs;
+      return (achievedFlopsPerSec / (PEAK_TFLOPS * 1e12)) * 100;
+    }
+
     function printSummary(m) {
       const mem = performance?.memory ? (performance.memory.usedJSHeapSize / 1073741824).toFixed(1) : '0.0';
+      const cfg = trainer.config.modelConfig;
+      const numParams = estimateParams(cfg);
+      const totalSeconds = m.elapsedSeconds; // includes overhead
+      const mfu = computeMFU(numParams, cfg.sequenceLen, trainer.config.batchSize, m.step, m.elapsedSeconds);
+      const valBpb = trainer.valBpb || 0;
       const summary = [
         '---',
+        `val_bpb:          ${valBpb.toFixed(6)}`,
         `val_loss:         ${m.smoothLoss.toFixed(6)}`,
         `training_seconds: ${m.elapsedSeconds.toFixed(1)}`,
+        `total_seconds:    ${totalSeconds.toFixed(1)}`,
+        `mfu_percent:      ${mfu.toFixed(2)}`,
         `tokens_per_sec:   ${Math.floor(m.tokensPerSec)}`,
         `total_tokens_M:   ${(m.totalTokens / 1e6).toFixed(1)}`,
         `num_steps:        ${m.step}`,
+        `num_params_M:     ${(numParams / 1e6).toFixed(1)}`,
+        `depth:            ${cfg.nLayer}`,
         `peers:            ${m.peersConnected}`,
         `all_reduce_ms:    ${m.allReduceTimeMs.toFixed(1)}`,
         `grad_norm:        ${m.gradNorm.toFixed(4)}`,
@@ -813,7 +833,9 @@
     function stopTraining() {
       if (trainer) {
         trainer.stop();
-        if (trainer.metrics) printSummary(trainer.metrics);
+        if (trainer.metrics) {
+          trainer.evaluateBpb().then(() => printSummary(trainer.metrics));
+        }
         trainer = null;
       }
       const btnStart = document.getElementById('btn-start');

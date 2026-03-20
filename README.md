@@ -1,6 +1,22 @@
 # bitresearch
 
-> Porting Karpathy's autoresearch GPT training to WebGPU and enabling distributed data-parallel training across a swarm of browser-based workers using WebRTC.
+> WebGPU port of Karpathy's autoresearch — autonomous GPT training research across a swarm of browser tabs via WebRTC.
+
+## Karpathy's autoresearch vs bitresearch
+
+| | Karpathy's autoresearch | bitresearch |
+|---|---|---|
+| **Runtime** | Python + PyTorch + CUDA | TypeScript + TF.js + WebGPU |
+| **Hardware** | Single NVIDIA GPU | Any device with a browser (Chrome/Safari/Edge) |
+| **Scaling** | Single GPU | Distributed across browser tabs via WebRTC ring all-reduce |
+| **Run command** | `uv run train.py` | `pnpm run train:headless` |
+| **Data** | Download + tokenize via `prepare.py` | Pre-tokenized at `public/data/tokens.bin` |
+| **Editable files** | `train.py` | `src/distributed/trainer.ts`, `src/model/gpt.ts` |
+| **Validation** | `evaluate_bpb()` in `prepare.py` | `evaluateBpb()` in `trainer.ts` |
+| **Metric** | `val_bpb` (bits per byte) | `val_bpb` (bits per byte) |
+| **Autonomous loop** | `program.md` instructs the agent | Same `program.md` protocol |
+| **Setup** | `uv run prepare.py && git checkout -b autoresearch/<tag>` | `pnpm install && git checkout -b bitresearch/<tag>` |
+| **No Python** | — | ✅ Zero Python at runtime |
 
 ## Overview
 
@@ -101,16 +117,16 @@ pnpm run dev:p2p
 | `train.py` (training loop) | `src/distributed/trainer.ts` | Forward/backward, optimizer, all-reduce, loss scaling. 100% browser-based. |
 | `train.py` (GPT model) | `src/model/gpt.ts` | TFJS transformer: RoPE, RMSNorm, sliding window attention. |
 | `make_dataloader()` | `src/data/dataloader.ts` | `TokenDataLoader` streams batches from `tokens.bin`. |
-| `evaluate_bpb()` | `src/model/validate.ts` | Validation. |
+| `evaluate_bpb()` | `trainer.evaluateBpb()` | Held-out val split, forward-only, convert nats → bpb. |
 | Hyperparams (top of `train.py`) | `src/model/config.ts` + trainer config in `p2p.html` | Model size, LR, batch size, time budget. |
-| `run.log` / `grep "^val_loss:"` | Console output + `printSummary()` on stop | Structured summary for result extraction. |
-| `results.tsv` | Manual (or pipe console output) | Log experiment results. |
+| `run.log` / `grep "^val_bpb:"` | Console output + `printSummary()` on stop | Structured summary for result extraction. |
+| `results.tsv` | `results.tsv` (untracked) | Same 5-column TSV format. |
 
 **The entire training pipeline — data loading, model forward/backward, optimization, gradient sync — runs in the browser via TFJS + WebRTC. No Python at runtime.**
 
 ## Training Goal
 
-The default goal is: **minimize `val_loss` (cross-entropy) within a fixed time budget.**
+The default goal is: **minimize `val_bpb` (validation bits per byte) within a fixed time budget.**
 
 This matches Karpathy's autoresearch protocol. Configure via:
 
