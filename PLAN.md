@@ -134,25 +134,37 @@ webgpu-distributed/
 - Coordinator tracks active workers and adjusts batch distribution
 - Stale gradients are discarded (staleness threshold)
 
-## Implementation Phases
+## Production Roadmap & Next Steps
 
-### Phase 1: WebGPU Tensor Library + Shaders ✏️
-Core WGSL compute shaders and a TypeScript Tensor class wrapping GPUBuffer.
+Ranked by the highest value for taking this distributed WebGPU training to production.
 
-### Phase 2: GPT Model Port
-Port GPTConfig, Embedding, Attention, MLP, and full GPT forward pass.
+### Priority 1: Full backward pass on WebGPU
+**Value:** Absolute Blocker. We cannot train a model without computing real gradients.
+- [ ] Scaffold the automatic differentiation (autograd) graph in the `Tensor` class.
+- [ ] Implement WGSL shaders for backward operations (e.g., `matmul_backward`, `attention_backward`, `layernorm_backward`).
+- [ ] Wire the cross-entropy loss output back to the model parameters in the training loop.
+- [ ] Validate gradients against a PyTorch reference for identical inputs.
 
-### Phase 3: Backward Pass (Autograd)
-Lightweight autograd system for computing gradients through the model.
+### Priority 2: Gradient compression
+**Value:** High. Raw parameter gradients are too large for efficient WebRTC transfer. Compression unlocks fast iteration speeds.
+- [ ] Implement `f32` to `f16` quantization and dequantization in JavaScript/WGSL.
+- [ ] Create a Top-K sparsification compute shader to identify and extract only the most significant gradient values.
+- [ ] Update the WebRTC data channel payload serialization to pack and unpack the compressed and sparsified tensors.
 
-### Phase 4: Coordinator Server
-Parameter server, gradient aggregation, data distribution, WebSocket protocol.
+### Priority 3: TURN server support & Cross-network training
+**Value:** High. Browsers behind symmetric NATs (corporate networks, strict firewalls) will fail to connect P2P without TURN.
+- [ ] Deploy a Coturn server or provision a cloud TURN provider (e.g., Twilio, Metered).
+- [ ] Update the `RTCPeerConnection` configuration in `webrtc-mesh.ts` to include TURN credentials.
+- [ ] Deploy the Node.js signaling server (`server/signaling.ts`) to a public endpoint (e.g., Render, Fly.io) to allow workers from different networks to discover each other.
 
-### Phase 5: Distributed Worker
-Browser-based worker that connects, receives params, trains, sends gradients.
+### Priority 4: Dynamic ring reformation
+**Value:** Medium-High. Essential for swarm stability. If a single tab closes, the current ring hangs. 
+- [ ] Add strict timeout detection during `Reduce-Scatter` and `All-Gather` phases.
+- [ ] Implement a lightweight heartbeat mechanism between peers and the signaling server.
+- [ ] Automatically trigger ring rebuilding when a peer drops, discard the failed step's gradients, and seamlessly resume the training loop.
 
-### Phase 6: Dashboard UI
-Beautiful real-time dashboard showing workers, loss curves, throughput.
-
-### Phase 7: Polish + Optimization
-Gradient compression, fault tolerance, performance tuning.
+### Priority 5: Checkpoint saving
+**Value:** Medium. Needed to extract the trained model and actually use the computation results.
+- [ ] Implement weight serialization into a standard format (e.g., `.safetensors` or raw binary).
+- [ ] Add an "Export Checkpoint" button in the Dashboard/Worker UI.
+- [ ] Allow downloading the serialized Blob directly from the browser memory.
