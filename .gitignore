@@ -2,4 +2,5 @@ node_modules
 .venv
 .DS_Store
 public/reference/
+rustbpe-wasm
 TIMELINE.md
