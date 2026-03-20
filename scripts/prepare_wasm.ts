@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
 import { Tokenizer } from 'rustbpe-wasm';
+import { syncParityArtifacts } from './parity-artifacts';
 
 // --- Constants ---
 const CACHE_DIR = path.join(os.homedir(), '.cache', 'autoresearch');
@@ -298,6 +299,15 @@ async function main() {
 
     console.log(`Binaries ready in ${BIN_DIR}`);
     console.log(`Tokenizer artifacts ready in ${TOKENIZER_DIR}`);
+
+    const parityArtifacts = await syncParityArtifacts({
+        cacheDir: CACHE_DIR,
+        binDir: BIN_DIR,
+        tokenizerDir: TOKENIZER_DIR,
+        publicDataDir: path.resolve(process.cwd(), 'public', 'data'),
+    });
+    console.log(`Parity artifacts mirrored into ${parityArtifacts.parityDir}`);
+    console.log(`Parity manifest written to ${parityArtifacts.manifestPath}`);
 }
 
 main().catch(console.error);

@@ -3,6 +3,7 @@ import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import cors from 'cors';
 import http from 'http';
+import path from 'path';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -57,6 +58,7 @@ const MODEL_CONFIG: ModelConfig = {
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use('/data', express.static(path.resolve('public', 'data')));
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
@@ -407,6 +409,8 @@ server.listen(PORT, () => {
 ║  Dashboard:  http://localhost:${PORT}                          ║
 ║  Worker WS:  ws://localhost:${PORT}/ws                         ║
 ║  API:        http://localhost:${PORT}/api/status                ║
+║  Data:       http://localhost:${PORT}/data/tokens.bin          ║
+║  Parity:     http://localhost:${PORT}/data/parity/manifest.json ║
 ║                                                              ║
 ║  Model: ${MODEL_CONFIG.nLayer}L / ${MODEL_CONFIG.nEmbd}D / ${MODEL_CONFIG.nHead}H              ║
 ║  Vocab: ${MODEL_CONFIG.vocabSize}  Seq: ${MODEL_CONFIG.sequenceLen}  Batch: ${BATCH_SIZE}                  ║
