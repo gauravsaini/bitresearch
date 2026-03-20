@@ -8,25 +8,32 @@ Primary goal: close the highest-impact implementation gaps against `karpathy/aut
 
 ### Active Parity Workstreams
 
-- [ ] Data pipeline parity
-  - [ ] Replace flat sequential token batching with BOS-aligned best-fit document packing.
-  - [ ] Support document-oriented token inputs in the browser data path.
-  - [ ] Keep validation batching compatible with Karpathy-style held-out evaluation.
+- [x] Data pipeline parity
+  - [x] Replace flat sequential token batching with BOS-aligned best-fit document packing.
+  - [x] Support document-oriented token inputs in the browser data path.
+  - [x] Keep validation batching compatible with Karpathy-style held-out evaluation.
 
-- [ ] Model parity
-  - [ ] Implement value embeddings / gated value residuals.
-  - [ ] Make `windowPattern` affect attention semantics instead of acting as config-only metadata.
-  - [ ] Correctly support `nKvHead < nHead` for GQA-style attention.
+- [x] Model parity
+  - [x] Implement value embeddings / gated value residuals.
+  - [x] Make `windowPattern` affect attention semantics instead of acting as config-only metadata.
+  - [x] Correctly support `nKvHead < nHead` for GQA-style attention.
 
-- [ ] Trainer parity
-  - [ ] Replace approximate BPB with token-byte-aware BPB.
-  - [ ] Improve LR scheduling toward Karpathy-style warmup / warmdown behavior.
-  - [ ] Integrate improved data/model surfaces without regressing checkpointing or UI flows.
+- [x] Trainer parity
+  - [x] Replace approximate BPB with token-byte-aware BPB.
+  - [x] Improve LR scheduling toward Karpathy-style warmup / warmdown behavior.
+  - [x] Integrate improved data/model surfaces without regressing checkpointing or UI flows.
 
-- [ ] Prepare/tokenizer parity
-  - [ ] Persist tokenizer artifacts needed downstream, not just shard bins.
-  - [ ] Emit metadata for BOS/special-token IDs and token byte lengths.
-  - [ ] Keep large-shard WASM tokenization stable under browser/Node memory limits.
+- [x] Prepare/tokenizer parity
+  - [x] Persist tokenizer artifacts needed downstream, not just shard bins.
+  - [x] Emit metadata for BOS/special-token IDs and token byte lengths.
+  - [x] Keep large-shard WASM tokenization stable under browser/Node memory limits.
+
+### Follow-Up Gaps
+
+- [ ] Wire browser training to consume parity-prepared document/token artifacts directly instead of the tiny checked-in sample under `public/data/`.
+- [ ] Add an explicit export/sync path from `~/.cache/autoresearch/` parity artifacts into browser-served assets for exact end-to-end runs.
+- [ ] Revisit optimizer parity beyond Adam scheduling if we want to approach Karpathy’s MuonAdamW behavior more closely in TFJS/WebGPU.
+- [ ] Refresh validation/reference assets in `src/model/validate.ts` if we want gradient parity checks against the new value-embedding model shape.
 
 ### Constraints
 

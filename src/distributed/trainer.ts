@@ -13,11 +13,14 @@ export interface TrainerConfig {
   batchSize: number;
   learningRate: number;
   warmupSteps: number;
+  warmdownFraction?: number;
+  finalLrFrac?: number;
   maxSteps: number;
   signalingUrl: string;
   minRingSize: number;      // pause training if connected peers < this
   checkpointInterval: number; // save checkpoint every N steps (0 = disabled)
   dataUrl: string;           // URL to fetch tokenized data (empty = synthetic)
+  tokenBytesUrl?: string;    // optional URL for token byte lengths (enables exact BPB)
 }
 
 export interface TrainerMetrics {
@@ -30,6 +33,7 @@ export interface TrainerMetrics {
   peersConnected: number;
   allReduceTimeMs: number;
   computeTimeMs: number;
+  stepTimeMs: number;
   elapsedSeconds: number;
 }
 
@@ -38,11 +42,14 @@ const DEFAULT_TRAINER_CONFIG: TrainerConfig = {
   batchSize: 4,
   learningRate: 0.001,
   warmupSteps: 10,
+  warmdownFraction: 0.5,
+  finalLrFrac: 0.0,
   maxSteps: Infinity,
   signalingUrl: 'ws://localhost:8788',
   minRingSize: 1,
   checkpointInterval: 0,
   dataUrl: '/data/tokens.bin',
+  tokenBytesUrl: '',
 };
 
 export class DistributedTrainer {
@@ -53,6 +60,7 @@ export class DistributedTrainer {
   private allReduce: RingAllReduce | null = null;
   private dataLoader: TokenDataLoader | null = null;
   private valTokens: Int32Array | null = null;
+  private tokenBytesTensor: tf.Tensor1D | null = null;
   private running = false;
   private startTime = 0;
   valBpb: number = 0;
@@ -67,6 +75,7 @@ export class DistributedTrainer {
     peersConnected: 0,
     allReduceTimeMs: 0,
     computeTimeMs: 0,
+    stepTimeMs: 0,
     elapsedSeconds: 0,
   };
 
@@ -80,6 +89,94 @@ export class DistributedTrainer {
 
   private lossScale = 1024.0;
   private consecutiveGoodGradients = 0;
+
+  private getTokenBytesUrlCandidates(): string[] {
+    const candidates = new Set<string>();
+
+    const explicit = this.config.tokenBytesUrl?.trim();
+    if (explicit) {
+      candidates.add(explicit);
+    }
+
+    if (this.config.dataUrl?.trim()) {
+      try {
+        const baseHref = typeof window !== 'undefined' ? window.location.href : 'http://localhost/';
+        const dataUrl = new URL(this.config.dataUrl, baseHref);
+        candidates.add(new URL('token_bytes.bin', dataUrl).toString());
+        candidates.add(new URL('token-bytes.bin', dataUrl).toString());
+        candidates.add(new URL('token_bytes.json', dataUrl).toString());
+      } catch {
+        // Ignore malformed URLs and fall back to explicit configuration only.
+      }
+    }
+
+    return Array.from(candidates);
+  }
+
+  private normalizeTokenByteLengths(lengths: ArrayLike<number>): Int32Array {
+    const vocabSize = this.config.modelConfig.vocabSize;
+    const normalized = new Int32Array(vocabSize);
+    const limit = Math.min(vocabSize, lengths.length);
+    for (let i = 0; i < limit; i++) {
+      normalized[i] = Math.max(0, Math.trunc(lengths[i]));
+    }
+    if (lengths.length !== vocabSize) {
+      this.log(`⚠️ token byte table length ${lengths.length} does not match vocab size ${vocabSize}; padded/truncated for BPB.`);
+    }
+    return normalized;
+  }
+
+  private async loadTokenBytesTable(): Promise<void> {
+    const candidates = this.getTokenBytesUrlCandidates();
+    if (candidates.length === 0) {
+      return;
+    }
+
+    const shouldLogFailures = Boolean(this.config.tokenBytesUrl?.trim());
+
+    for (const url of candidates) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) {
+          if (shouldLogFailures) {
+            this.log(`⚠️ Could not load token byte lengths from ${url}: HTTP ${res.status}`);
+          }
+          continue;
+        }
+
+        let lengths: Int32Array | null = null;
+        const contentType = res.headers.get('content-type') || '';
+        if (url.endsWith('.json') || contentType.includes('json')) {
+          const json = await res.json();
+          const arr = Array.isArray(json) ? json : Array.isArray((json as any)?.data) ? (json as any).data : null;
+          if (!arr) {
+            throw new Error(`Unsupported token bytes JSON format at ${url}`);
+          }
+          lengths = this.normalizeTokenByteLengths(arr as ArrayLike<number>);
+        } else {
+          const buf = await res.arrayBuffer();
+          if (buf.byteLength === 0) {
+            throw new Error(`Empty token byte table at ${url}`);
+          }
+          if (buf.byteLength % 4 !== 0) {
+            throw new Error(`Token byte table at ${url} is not 32-bit aligned (${buf.byteLength} bytes)`);
+          }
+          lengths = this.normalizeTokenByteLengths(new Int32Array(buf));
+        }
+
+        if (this.tokenBytesTensor) {
+          this.tokenBytesTensor.dispose();
+        }
+        this.tokenBytesTensor = tf.tensor1d(lengths, 'int32');
+        this.log(`🧮 Loaded token byte lengths from ${url} for exact BPB evaluation`);
+        return;
+      } catch (e) {
+        if (shouldLogFailures) {
+          this.log(`⚠️ Could not load token byte lengths from ${url}: ${e}`);
+        }
+      }
+    }
+  }
 
   private log(msg: string): void {
     console.log(`[Trainer] ${msg}`);
@@ -112,8 +209,15 @@ export class DistributedTrainer {
       }
     }
 
+    await this.loadTokenBytesTable();
+
     // Initialize optimizer
-    this.optimizer = tf.train.adam(this.config.learningRate, 0.9, 0.999);
+    this.optimizer = tf.train.adam(
+      this.config.learningRate,
+      0.8,
+      0.95,
+      1e-10,
+    );
 
     // Connect to WebRTC signaling
     this.log('🌐 Connecting to signaling server...');
@@ -172,11 +276,32 @@ export class DistributedTrainer {
     return { inputIds, targets };
   }
 
+  private getScheduleTotalSteps(): number | null {
+    return Number.isFinite(this.config.maxSteps) ? Math.max(0, Math.floor(this.config.maxSteps)) : null;
+  }
+
   private getLearningRate(step: number): number {
-    if (step < this.config.warmupSteps) {
-      return this.config.learningRate * (step + 1) / this.config.warmupSteps;
+    const baseLr = this.config.learningRate;
+    const warmupSteps = Math.max(0, Math.floor(this.config.warmupSteps));
+    const totalSteps = this.getScheduleTotalSteps();
+    const warmdownFraction = Math.max(0, Math.min(1, this.config.warmdownFraction ?? 0.5));
+    const finalFrac = Math.max(0, Math.min(1, this.config.finalLrFrac ?? 0));
+
+    if (warmupSteps > 0 && step < warmupSteps) {
+      return baseLr * (step + 1) / warmupSteps;
     }
-    return this.config.learningRate;
+
+    if (totalSteps !== null && warmdownFraction > 0) {
+      const warmdownSteps = Math.max(1, Math.floor(totalSteps * warmdownFraction));
+      const warmdownStart = Math.max(warmupSteps, totalSteps - warmdownSteps);
+      if (step >= warmdownStart) {
+        const progress = Math.min(1, Math.max(0, (step - warmdownStart + 1) / warmdownSteps));
+        const multiplier = 1 - progress * (1 - finalFrac);
+        return baseLr * multiplier;
+      }
+    }
+
+    return baseLr;
   }
 
   private residualBuffer: Float32Array | null = null;
@@ -226,6 +351,7 @@ export class DistributedTrainer {
     const B = this.config.batchSize;
     const T = this.config.modelConfig.sequenceLen;
     const step = this.metrics.step;
+    const stepStart = performance.now();
 
     // 1. Generate Batch
     const { inputIds, targets } = this.generateBatch();
@@ -247,7 +373,8 @@ export class DistributedTrainer {
 
     // Check for F16 overflow (max value ~65500)
     let overflow = false;
-    const gradTensors = Object.values(scaledGrads);
+    const gradMap = scaledGrads as Record<string, tf.Tensor>;
+    const gradTensors = Object.values(gradMap);
     if (gradTensors.length > 0) {
       const maxArr = gradTensors.map(g => g.abs().max());
       const globalMaxT = tf.max(tf.stack(maxArr));
@@ -301,7 +428,7 @@ export class DistributedTrainer {
     
     let offset = 0;
     for (const v of vars) {
-      const g = scaledGrads[v.name];
+      const g = gradMap[v.name];
       if (g) {
         const gData = await g.data();
         flatGrads.set(gData as Float32Array, offset);
@@ -326,7 +453,7 @@ export class DistributedTrainer {
         // All-reduce was aborted (peer failure mid-step)
         this.log(`⚠️ All-reduce aborted at step ${step}, skipping optimizer update`);
         // Dispose tensors
-        for (const v of vars) { scaledGrads[v.name]?.dispose(); }
+        for (const v of vars) { gradMap[v.name]?.dispose(); }
         scaledLossTensor.dispose();
         inputTensor.dispose();
         targetTensor.dispose();
@@ -370,7 +497,9 @@ export class DistributedTrainer {
     this.metrics.computeTimeMs = computeTimeMs;
     this.metrics.allReduceTimeMs = allReduceTimeMs;
     this.metrics.peersConnected = this.mesh.connectedPeerCount;
-    this.metrics.tokensPerSec = tokensProcessed / (computeTimeMs / 1000);
+    const stepTimeMs = performance.now() - stepStart;
+    this.metrics.stepTimeMs = stepTimeMs;
+    this.metrics.tokensPerSec = tokensProcessed / (stepTimeMs / 1000);
     this.metrics.elapsedSeconds = (performance.now() - this.startTime) / 1000;
 
     this.onMetricsUpdate?.(this.metrics);
@@ -380,9 +509,10 @@ export class DistributedTrainer {
 
   /**
    * Evaluate validation bits per byte (BPB).
-   * Runs forward-only passes on held-out validation tokens, computes mean cross-entropy,
-   * then converts nats → bits → per-byte. Mirrors Karpathy's evaluate_bpb() in prepare.py.
-   * Default avgBytesPerToken=1.0 is a conservative approximation for SentencePiece tokens.
+   * Runs forward-only passes on held-out validation tokens and computes byte-weighted
+   * cross-entropy. When a token byte-length table is available, this mirrors Karpathy's
+   * evaluate_bpb() semantics exactly: sum nats, sum bytes, then convert nats/byte to bits/byte.
+   * Otherwise it falls back to the legacy avgBytesPerToken approximation.
    */
   async evaluateBpb(batchSize?: number, numBatches = 10, avgBytesPerToken = 1.0): Promise<number> {
     if (!this.model || !this.valTokens || this.valTokens.length === 0) {
@@ -391,32 +521,78 @@ export class DistributedTrainer {
 
     const B = batchSize ?? this.config.batchSize;
     const T = this.config.modelConfig.sequenceLen;
-    let totalLoss = 0;
-    const maxOffset = this.valTokens.length - B * T;
-    if (maxOffset <= 0) return 0;
+    const tokensPerBatch = B * T;
+    const totalTokens = this.valTokens.length;
+    if (tokensPerBatch <= 0 || totalTokens <= 1) return 0;
+
+    const vocabSize = this.config.modelConfig.vocabSize;
+    const hasExactTokenBytes = this.tokenBytesTensor !== null;
+    const tokenBytesTensor = this.tokenBytesTensor;
+    let totalNats = 0;
+    let totalBytes = 0;
+    let offset = 0;
 
     for (let b = 0; b < numBatches; b++) {
-      const offset = Math.floor(Math.random() * maxOffset);
       const { inputIds, targets } = TokenDataLoader.batchFromArray(this.valTokens, B, T, offset);
+      offset = (offset + tokensPerBatch) % totalTokens;
 
       const inputTensor = tf.tensor2d(inputIds, [B, T], 'int32');
       const targetTensor = tf.tensor2d(targets, [B, T], 'int32');
 
-      const lossVal = tf.tidy(() => {
-        const lossTensor = this.model!.forward(inputTensor, targetTensor).loss;
-        return (lossTensor.dataSync() as Float32Array)[0];
+      const batchStats = tf.tidy(() => {
+        const forward = this.model!.forward(inputTensor, targetTensor, true);
+        const logits = forward.logits as tf.Tensor2D;
+        const flatTargets = targetTensor.reshape([-1]);
+        const validMask = flatTargets.notEqual(-1);
+        const safeTargets = tf.maximum(flatTargets, 0).toInt();
+        const tokenIndices = tf.range(0, safeTargets.size, 1, 'int32');
+        const gatherIndices = tf.stack([tokenIndices, safeTargets], 1);
+        const logProbs = tf.logSoftmax(logits, -1);
+        const perTokenNats = tf.neg(tf.gatherND(logProbs, gatherIndices));
+        const validMaskF = tf.cast(validMask, 'float32');
+
+        if (hasExactTokenBytes && tokenBytesTensor) {
+          const byteLengths = tf.gather(tokenBytesTensor, safeTargets).toFloat();
+          const byteMask = tf.logicalAnd(validMask, byteLengths.greater(0));
+          const byteMaskF = tf.cast(byteMask, 'float32');
+          return {
+            totalNatsTensor: perTokenNats.mul(byteMaskF).sum(),
+            totalBytesTensor: byteLengths.mul(byteMaskF).sum(),
+            exact: true,
+          };
+        }
+
+        return {
+          totalNatsTensor: perTokenNats.mul(validMaskF).sum(),
+          totalBytesTensor: tf.scalar(avgBytesPerToken, 'float32').mul(validMaskF.sum()),
+          exact: false,
+        };
       });
 
-      totalLoss += lossVal;
+      const [batchNats] = await batchStats.totalNatsTensor.data();
+      const [batchBytes] = await batchStats.totalBytesTensor.data();
+      totalNats += batchNats;
+      totalBytes += batchBytes;
+      batchStats.totalNatsTensor.dispose();
+      batchStats.totalBytesTensor.dispose();
       inputTensor.dispose();
       targetTensor.dispose();
     }
 
-    const meanNats = totalLoss / numBatches;
-    // bpb = mean_nats / (ln(2) * avg_bytes_per_token)
-    // With avgBytesPerToken=1.0, this is just nats → bits conversion
-    this.valBpb = meanNats / (Math.log(2) * avgBytesPerToken);
-    this.log(`📊 val_bpb: ${this.valBpb.toFixed(6)} (mean_loss=${meanNats.toFixed(6)}, ${numBatches} batches)`);
+    if (totalBytes <= 0) {
+      return 0;
+    }
+
+    this.valBpb = totalNats / (Math.log(2) * totalBytes);
+    if (hasExactTokenBytes) {
+      this.log(
+        `📊 val_bpb: ${this.valBpb.toFixed(6)} (exact bytes, total_nats=${totalNats.toFixed(6)}, total_bytes=${totalBytes.toFixed(0)}, ${numBatches} batches)`,
+      );
+    } else {
+      this.log(
+        `📊 val_bpb: ${this.valBpb.toFixed(6)} (fallback avgBytesPerToken=${avgBytesPerToken}, total_nats=${totalNats.toFixed(6)}, total_bytes=${totalBytes.toFixed(0)}, ${numBatches} batches)`,
+      );
+    }
     return this.valBpb;
   }
 
@@ -632,7 +808,7 @@ export class DistributedTrainer {
     let restoredMoments = 0;
 
     // Restore model weights
-    for (const [varName, varObj] of Object.entries(varsByName)) {
+    for (const [varName, varObj] of Object.entries(varsByName) as Array<[string, tf.Variable]>) {
       const entry = header[varName];
       if (!entry) {
         this.log(`⚠️ No checkpoint data for weight: ${varName}`);
@@ -720,7 +896,10 @@ export class DistributedTrainer {
 
   destroy(): void {
     this.stop();
+    if (this.tokenBytesTensor) {
+      this.tokenBytesTensor.dispose();
+      this.tokenBytesTensor = null;
+    }
     this.mesh.disconnect();
   }
 }
-
