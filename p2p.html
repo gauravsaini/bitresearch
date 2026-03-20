@@ -1,12 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WebGPU P2P Worker — Distributed Training</title>
   <meta name="description" content="Peer-to-peer WebGPU worker for decentralized GPT training via WebRTC">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet">
   <style>
     :root {
       --bg-primary: #0a0b0f;
@@ -29,7 +32,11 @@
       --font-mono: 'JetBrains Mono', monospace;
     }
 
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
 
     body {
       font-family: var(--font-sans);
@@ -100,8 +107,13 @@
     }
 
     @keyframes ringRotate {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
+      from {
+        transform: rotate(0deg);
+      }
+
+      to {
+        transform: rotate(360deg);
+      }
     }
 
     .header-controls {
@@ -253,14 +265,33 @@
       margin-right: 5px;
     }
 
-    .peer-dot.connected { background: var(--accent-green); }
-    .peer-dot.connecting { background: var(--accent-orange); animation: pulse 1s ease infinite; }
-    .peer-dot.self { background: var(--accent-cyan); }
-    .peer-dot.disconnected { background: var(--text-muted); }
+    .peer-dot.connected {
+      background: var(--accent-green);
+    }
+
+    .peer-dot.connecting {
+      background: var(--accent-orange);
+      animation: pulse 1s ease infinite;
+    }
+
+    .peer-dot.self {
+      background: var(--accent-cyan);
+    }
+
+    .peer-dot.disconnected {
+      background: var(--text-muted);
+    }
 
     @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.3; }
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: 0.3;
+      }
     }
 
     .metrics-grid {
@@ -282,16 +313,35 @@
     .metric-card::before {
       content: '';
       position: absolute;
-      top: 0; left: 0; right: 0;
+      top: 0;
+      left: 0;
+      right: 0;
       height: 2px;
     }
 
-    .metric-card:nth-child(1)::before { background: linear-gradient(90deg, var(--accent-cyan), transparent); }
-    .metric-card:nth-child(2)::before { background: linear-gradient(90deg, var(--accent-green), transparent); }
-    .metric-card:nth-child(3)::before { background: linear-gradient(90deg, var(--accent-purple), transparent); }
-    .metric-card:nth-child(4)::before { background: linear-gradient(90deg, var(--accent-blue), transparent); }
-    .metric-card:nth-child(5)::before { background: linear-gradient(90deg, var(--accent-orange), transparent); }
-    .metric-card:nth-child(6)::before { background: linear-gradient(90deg, var(--accent-red), transparent); }
+    .metric-card:nth-child(1)::before {
+      background: linear-gradient(90deg, var(--accent-cyan), transparent);
+    }
+
+    .metric-card:nth-child(2)::before {
+      background: linear-gradient(90deg, var(--accent-green), transparent);
+    }
+
+    .metric-card:nth-child(3)::before {
+      background: linear-gradient(90deg, var(--accent-purple), transparent);
+    }
+
+    .metric-card:nth-child(4)::before {
+      background: linear-gradient(90deg, var(--accent-blue), transparent);
+    }
+
+    .metric-card:nth-child(5)::before {
+      background: linear-gradient(90deg, var(--accent-orange), transparent);
+    }
+
+    .metric-card:nth-child(6)::before {
+      background: linear-gradient(90deg, var(--accent-red), transparent);
+    }
 
     .metric-label {
       font-size: 0.65rem;
@@ -307,12 +357,29 @@
       font-weight: 700;
     }
 
-    .metric-card:nth-child(1) .metric-value { color: var(--accent-cyan); }
-    .metric-card:nth-child(2) .metric-value { color: var(--accent-green); }
-    .metric-card:nth-child(3) .metric-value { color: var(--accent-purple); }
-    .metric-card:nth-child(4) .metric-value { color: var(--accent-blue); }
-    .metric-card:nth-child(5) .metric-value { color: var(--accent-orange); }
-    .metric-card:nth-child(6) .metric-value { color: var(--accent-red); }
+    .metric-card:nth-child(1) .metric-value {
+      color: var(--accent-cyan);
+    }
+
+    .metric-card:nth-child(2) .metric-value {
+      color: var(--accent-green);
+    }
+
+    .metric-card:nth-child(3) .metric-value {
+      color: var(--accent-purple);
+    }
+
+    .metric-card:nth-child(4) .metric-value {
+      color: var(--accent-blue);
+    }
+
+    .metric-card:nth-child(5) .metric-value {
+      color: var(--accent-orange);
+    }
+
+    .metric-card:nth-child(6) .metric-value {
+      color: var(--accent-red);
+    }
 
     .metric-sub {
       font-size: 0.68rem;
@@ -368,21 +435,47 @@
       border-bottom: 1px solid rgba(255, 255, 255, 0.02);
     }
 
-    .log-entry.p2p { color: var(--accent-cyan); }
-    .log-entry.train { color: var(--accent-green); }
-    .log-entry.error { color: var(--accent-red); }
-    .log-entry.ar { color: var(--accent-purple); }
+    .log-entry.p2p {
+      color: var(--accent-cyan);
+    }
 
-    ::-webkit-scrollbar { width: 5px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 3px; }
+    .log-entry.train {
+      color: var(--accent-green);
+    }
+
+    .log-entry.error {
+      color: var(--accent-red);
+    }
+
+    .log-entry.ar {
+      color: var(--accent-purple);
+    }
+
+    ::-webkit-scrollbar {
+      width: 5px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border-default);
+      border-radius: 3px;
+    }
 
     @media (max-width: 768px) {
-      .metrics-grid { grid-template-columns: repeat(2, 1fr); }
-      .peer-cards { grid-template-columns: 1fr; }
+      .metrics-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .peer-cards {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
+
 <body>
   <div id="p2p-app">
     <!-- Header -->
@@ -390,21 +483,22 @@
       <div class="p2p-logo">
         <div class="ring-viz">
           <svg viewBox="0 0 48 48">
-            <circle cx="24" cy="24" r="18" fill="none" stroke="rgba(34, 211, 238, 0.3)" stroke-width="2"/>
-            <circle cx="24" cy="24" r="18" fill="none" stroke="url(#ringGrad)" stroke-width="2" stroke-dasharray="20 93" stroke-linecap="round"/>
-            <circle cx="24" cy="6" r="4" fill="#22d3ee"/>
-            <circle cx="42" cy="24" r="3" fill="#a78bfa"/>
-            <circle cx="24" cy="42" r="3" fill="#34d399"/>
-            <circle cx="6" cy="24" r="3" fill="#fb923c"/>
+            <circle cx="24" cy="24" r="18" fill="none" stroke="rgba(34, 211, 238, 0.3)" stroke-width="2" />
+            <circle cx="24" cy="24" r="18" fill="none" stroke="url(#ringGrad)" stroke-width="2" stroke-dasharray="20 93"
+              stroke-linecap="round" />
+            <circle cx="24" cy="6" r="4" fill="#22d3ee" />
+            <circle cx="42" cy="24" r="3" fill="#a78bfa" />
+            <circle cx="24" cy="42" r="3" fill="#34d399" />
+            <circle cx="6" cy="24" r="3" fill="#fb923c" />
             <defs>
               <linearGradient id="ringGrad" x1="0" y1="0" x2="48" y2="48">
-                <stop offset="0%" stop-color="#22d3ee"/>
-                <stop offset="100%" stop-color="#a78bfa"/>
+                <stop offset="0%" stop-color="#22d3ee" />
+                <stop offset="100%" stop-color="#a78bfa" />
               </linearGradient>
             </defs>
           </svg>
         </div>
-        <h1><span class="gradient-text">P2P</span> Distributed Trainer</h1>
+        <h1><span class="gradient-text">BitResearch</span> P2P Trainer</h1>
       </div>
       <div class="header-controls">
         <button class="btn btn-primary" id="btn-start" onclick="startTraining()">▶ Start Training</button>
@@ -628,8 +722,8 @@
 
       trainer.onLog = (msg) => {
         const type = msg.includes('[P2P]') || msg.includes('[AR]') ? 'p2p' :
-                     msg.includes('Step') ? 'train' :
-                     msg.includes('❌') ? 'error' : '';
+          msg.includes('Step') ? 'train' :
+            msg.includes('❌') ? 'error' : '';
         addLog(msg, type);
       };
 
@@ -708,7 +802,8 @@
       container.innerHTML = html;
     }
 
-    addLog('P2P Distributed Trainer loaded. Click "Start Training" to begin.', 'p2p');
+    addLog('BitSearch loaded. Click "Start Training" to begin.', 'p2p');
   </script>
 </body>
+
 </html>

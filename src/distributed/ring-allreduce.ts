@@ -15,19 +15,19 @@ export interface AllReduceConfig {
   numChunks?: number;     // split gradients into this many chunks (default: numPeers)
   timeoutMs?: number;     // timeout per phase (default: 10000)
   onProgress?: (phase: string, step: number, totalSteps: number) => void;
+  onAbort?: (reason: string, phase: string, step: number) => void;
 }
 
 export class RingAllReduce {
   private mesh: WebRTCMesh;
   private config: AllReduceConfig;
   private currentStep: number = 0;
+  private aborted = false;
 
   // State for in-progress all-reduce
   private chunks: Float32Array[] = [];
   private receivedChunks = new Map<number, Float32Array>();
   private phaseResolvers = new Map<string, () => void>();
-  private expectedReceives = 0;
-  private receivedCount = 0;
 
   onLog: ((msg: string) => void) | null = null;
 
@@ -37,12 +37,36 @@ export class RingAllReduce {
       numChunks: config.numChunks,
       timeoutMs: config.timeoutMs || 10000,
       onProgress: config.onProgress,
+      onAbort: config.onAbort,
     };
 
     // Register gradient receive handler
     this.mesh.onGradientsReceived = (fromPeerId, chunk, chunkIndex, phase) => {
       this.handleReceivedChunk(fromPeerId, chunk, chunkIndex, phase);
     };
+  }
+
+  /** Abort current all-reduce operation (e.g., on peer failure mid-step) */
+  abort(reason: string): void {
+    this.aborted = true;
+    this.log(`🚨 All-reduce aborted: ${reason}`);
+    // Resolve all pending waiters with null so they don't hang
+    for (const [key, resolver] of this.phaseResolvers) {
+      this.phaseResolvers.delete(key);
+      resolver();
+    }
+    this.config.onAbort?.(reason, 'unknown', this.currentStep);
+  }
+
+  get isAborted(): boolean {
+    return this.aborted;
+  }
+
+  /** Reset abort state for a new all-reduce operation */
+  resetAbort(): void {
+    this.aborted = false;
+    this.receivedChunks.clear();
+    this.phaseResolvers.clear();
   }
 
   private log(msg: string): void {
@@ -52,13 +76,13 @@ export class RingAllReduce {
 
   /**
    * Perform ring all-reduce on local gradients.
-   * Returns the averaged gradients (same shape as input).
+   * Returns the averaged gradients (same shape as input), or null if aborted.
    *
    * @param localGradients - This worker's local gradients (flat Float32Array)
    * @param stepId - Training step ID for sequencing
-   * @returns Averaged gradients across all peers
+   * @returns Averaged gradients across all peers, or null if aborted
    */
-  async allReduce(localGradients: Float32Array, stepId: number): Promise<Float32Array> {
+  async allReduce(localGradients: Float32Array, stepId: number): Promise<Float32Array | null> {
     const ring = this.mesh.topology;
     if (!ring) {
       this.log('No ring topology — returning local gradients (no averaging)');
@@ -71,6 +95,7 @@ export class RingAllReduce {
     }
 
     this.currentStep = stepId;
+    this.resetAbort();
     const numChunks = this.config.numChunks || N;
     const chunkSize = Math.ceil(localGradients.length / numChunks);
 
@@ -92,6 +117,11 @@ export class RingAllReduce {
 
     this.log('Phase 1: Reduce-Scatter');
     for (let step = 0; step < N - 1; step++) {
+      if (this.aborted) {
+        this.log('Reduce-Scatter aborted mid-phase');
+        return null;
+      }
+
       const sendIdx = ((ring.self - step) % numChunks + numChunks) % numChunks;
       const recvIdx = ((ring.self - step - 1) % numChunks + numChunks) % numChunks;
 
@@ -99,10 +129,18 @@ export class RingAllReduce {
       const success = this.mesh.sendGradientChunk(this.chunks[sendIdx], sendIdx, stepId, 'scatter');
       if (!success) {
         this.log(`Failed to send chunk ${sendIdx} in scatter step ${step}`);
+        // Abort on send failure — peer likely disconnected
+        this.abort(`Send failed at scatter step ${step}`);
+        return null;
       }
 
       // Wait for chunk from left neighbor
       const received = await this.waitForChunk(recvIdx, 'scatter', step);
+
+      if (this.aborted) {
+        this.log('Reduce-Scatter aborted during wait');
+        return null;
+      }
 
       if (received) {
         // Accumulate: add received chunk to our local chunk
@@ -110,6 +148,10 @@ export class RingAllReduce {
         for (let i = 0; i < local.length; i++) {
           local[i] += received[i];
         }
+      } else {
+        // Timeout — abort
+        this.abort(`Timeout at scatter step ${step}, chunk ${recvIdx}`);
+        return null;
       }
 
       this.config.onProgress?.('scatter', step + 1, N - 1);
@@ -130,6 +172,11 @@ export class RingAllReduce {
 
     this.log('Phase 2: All-Gather');
     for (let step = 0; step < N - 1; step++) {
+      if (this.aborted) {
+        this.log('All-Gather aborted mid-phase');
+        return null;
+      }
+
       const sendIdx = ((ring.self - step + 1) % numChunks + numChunks) % numChunks;
       const recvIdx = ((ring.self - step) % numChunks + numChunks) % numChunks;
 
@@ -139,9 +186,18 @@ export class RingAllReduce {
       // Wait for chunk from left
       const received = await this.waitForChunk(recvIdx, 'gather', step);
 
+      if (this.aborted) {
+        this.log('All-Gather aborted during wait');
+        return null;
+      }
+
       if (received) {
         // Replace our chunk with the received fully-reduced chunk
         this.chunks[recvIdx].set(received);
+      } else {
+        // Timeout — abort
+        this.abort(`Timeout at gather step ${step}, chunk ${recvIdx}`);
+        return null;
       }
 
       this.config.onProgress?.('gather', step + 1, N - 1);
@@ -166,10 +222,10 @@ export class RingAllReduce {
     chunkIndex: number,
     phase: 'scatter' | 'gather',
   ): void {
-    const key = `${phase}-${chunkIndex}`;
     this.receivedChunks.set(chunkIndex, new Float32Array(chunk));
 
     // Resolve any waiting promise
+    const key = `${phase}-${chunkIndex}`;
     const resolver = this.phaseResolvers.get(key);
     if (resolver) {
       this.phaseResolvers.delete(key);

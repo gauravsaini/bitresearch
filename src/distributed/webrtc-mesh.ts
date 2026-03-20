@@ -15,6 +15,8 @@ export interface PeerInfo {
   recvChannel: RTCDataChannel | null;
   ringPosition: number;     // position in the ring (0..N-1)
   latencyMs: number;
+  smoothedLatencyMs: number; // EMA of latency for dynamic timeout
+  lastPingSent: number;
   bytesReceived: number;
   bytesSent: number;
 }
@@ -37,22 +39,78 @@ const RTC_CONFIG: RTCConfiguration = {
   ],
 };
 
+export interface TurnServerConfig {
+  urls: string[];
+  username?: string;
+  credential?: string;
+  credentialType?: 'password' | 'token';
+}
+
+export interface WebRTCMeshConfig {
+  turnServers?: TurnServerConfig[];
+  pingIntervalMs?: number;
+  latencySmoothingBeta?: number;
+}
+
 export class WebRTCMesh {
   private peers = new Map<string, PeerInfo>();
   private localPeerId: string;
   private signalingWs: WebSocket | null = null;
   private ring: RingTopology | null = null;
+  private meshConfig: WebRTCMeshConfig;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private room: string | null = null;
 
   onGradientsReceived: OnGradientsReceived | null = null;
   onPeerStateChange: OnPeerStateChange | null = null;
   onLog: OnLog | null = null;
   onRingFormed: ((ring: RingTopology) => void) | null = null;
+  onPeerLatencyUpdate: ((peerId: string, latencyMs: number, smoothedLatencyMs: number) => void) | null = null;
 
   // Pending ICE candidates (received before remote description is set)
   private pendingCandidates = new Map<string, RTCIceCandidateInit[]>();
 
-  constructor(peerId: string) {
+  constructor(peerId: string, config: WebRTCMeshConfig = {}) {
     this.localPeerId = peerId;
+    this.meshConfig = {
+      pingIntervalMs: config.pingIntervalMs ?? 2000,
+      latencySmoothingBeta: config.latencySmoothingBeta ?? 0.9,
+      turnServers: config.turnServers ?? [],
+    };
+  }
+
+  /** Get RTC config with TURN servers injected */
+  private get rtcConfig(): RTCConfiguration {
+    const iceServers: RTCIceServer[] = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ];
+    for (const turn of this.meshConfig.turnServers ?? []) {
+      iceServers.push({
+        urls: turn.urls,
+        username: turn.username,
+        credential: turn.credential,
+      });
+    }
+    return { iceServers };
+  }
+
+  /** Compute dynamic timeout based on peer latencies (max peer latency * 3 + base) */
+  get dynamicTimeoutMs(): number {
+    const base = 10000;
+    let maxLatency = 0;
+    for (const peer of this.peers.values()) {
+      if (peer.state === 'connected' && peer.smoothedLatencyMs > 0) {
+        maxLatency = Math.max(maxLatency, peer.smoothedLatencyMs);
+      }
+    }
+    if (maxLatency === 0) return base;
+    return Math.max(base, maxLatency * 3 + 5000);
+  }
+
+  /** Set room for isolated swarms */
+  setRoom(room: string): void {
+    this.room = room;
   }
 
   get peerId(): string {
@@ -81,12 +139,13 @@ export class WebRTCMesh {
 
     this.signalingWs.onopen = () => {
       this.log('Connected to signaling server');
-      // Register ourselves
       this.sendSignaling({
         type: 'register',
         peerId: this.localPeerId,
+        room: this.room,
         timestamp: Date.now(),
       });
+      this.startPingTimer();
     };
 
     this.signalingWs.onmessage = (event) => {
@@ -100,6 +159,7 @@ export class WebRTCMesh {
 
     this.signalingWs.onclose = () => {
       this.log('Signaling server disconnected');
+      this.stopPingTimer();
       // Reconnect after delay
       setTimeout(() => this.connectSignaling(signalingUrl), 3000);
     };
@@ -107,6 +167,32 @@ export class WebRTCMesh {
     this.signalingWs.onerror = (e) => {
       this.log(`Signaling error: ${e}`);
     };
+  }
+
+  /** Start periodic ping to measure peer latencies */
+  private startPingTimer(): void {
+    this.stopPingTimer();
+    this.pingTimer = setInterval(() => {
+      this.pingAllPeers();
+    }, this.meshConfig.pingIntervalMs ?? 2000);
+  }
+
+  private stopPingTimer(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
+  /** Send ping to all connected peers for latency measurement */
+  private pingAllPeers(): void {
+    for (const peer of this.peers.values()) {
+      if (peer.state === 'connected' && peer.sendChannel?.readyState === 'open') {
+        peer.lastPingSent = performance.now();
+        // ping message: [type=1]
+        peer.sendChannel.send(new Uint8Array([1]).buffer);
+      }
+    }
   }
 
   private sendSignaling(msg: any): void {
@@ -126,6 +212,20 @@ export class WebRTCMesh {
           totalPeers: msg.totalPeers,
         };
         this.log(`Ring formed! Position ${msg.position}/${msg.totalPeers} | left=${msg.leftPeer.slice(-6)} right=${msg.rightPeer.slice(-6)}`);
+
+        // Inject TURN credentials if provided (Coturn HMAC rotation)
+        if (msg.turnServers) {
+          this.meshConfig.turnServers = [
+            ...(this.meshConfig.turnServers ?? []),
+            {
+              urls: msg.turnServers.urls,
+              username: msg.turnServers.username,
+              credential: msg.turnServers.credential,
+            },
+          ];
+          this.log(`🔐 TURN credentials received (expires: ${new Date(msg.turnServers.expiresAt * 1000).toISOString()})`);
+        }
+
         this.onRingFormed?.(this.ring);
 
         // Initiate connections to ring neighbors
@@ -172,7 +272,7 @@ export class WebRTCMesh {
   private async createPeerConnection(remotePeerId: string): Promise<void> {
     this.log(`Creating connection to ${remotePeerId.slice(-6)}`);
 
-    const pc = new RTCPeerConnection(RTC_CONFIG);
+    const pc = new RTCPeerConnection(this.rtcConfig);
     const peer: PeerInfo = {
       peerId: remotePeerId,
       state: 'connecting',
@@ -181,6 +281,8 @@ export class WebRTCMesh {
       recvChannel: null,
       ringPosition: -1,
       latencyMs: 0,
+      smoothedLatencyMs: 0,
+      lastPingSent: 0,
       bytesReceived: 0,
       bytesSent: 0,
     };
@@ -254,7 +356,7 @@ export class WebRTCMesh {
     let peer = this.peers.get(fromPeerId);
 
     if (!peer) {
-      const pc = new RTCPeerConnection(RTC_CONFIG);
+      const pc = new RTCPeerConnection(this.rtcConfig);
       peer = {
         peerId: fromPeerId,
         state: 'connecting',
@@ -263,6 +365,8 @@ export class WebRTCMesh {
         recvChannel: null,
         ringPosition: -1,
         latencyMs: 0,
+        smoothedLatencyMs: 0,
+        lastPingSent: 0,
         bytesReceived: 0,
         bytesSent: 0,
       };
@@ -401,7 +505,6 @@ export class WebRTCMesh {
       // Gradient chunk: [type(1) | phase(1) | chunkIndex(u32) | stepId(u32) | data(f16[])]
       const phase = view.getUint8(1) === 0 ? 'scatter' : 'gather';
       const chunkIndex = view.getUint32(2, true);
-      // const stepId = view.getUint32(6, true);
       
       // Decompress f16 back to f32 for accurate math
       const f16Gradients = new Float16Array(data, 12);
@@ -412,9 +515,15 @@ export class WebRTCMesh {
       // Ping — respond with pong
       this.sendToPeer(fromPeerId, new Uint8Array([2]).buffer);
     } else if (msgType === 2) {
-      // Pong
-      if (peer) {
-        // Could track latency here
+      // Pong — compute latency
+      if (peer && peer.lastPingSent > 0) {
+        const rtt = performance.now() - peer.lastPingSent;
+        peer.latencyMs = rtt;
+        const beta = this.meshConfig.latencySmoothingBeta ?? 0.9;
+        peer.smoothedLatencyMs = peer.smoothedLatencyMs === 0
+          ? rtt
+          : beta * peer.smoothedLatencyMs + (1 - beta) * rtt;
+        this.onPeerLatencyUpdate?.(fromPeerId, rtt, peer.smoothedLatencyMs);
       }
     }
   }

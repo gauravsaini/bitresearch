@@ -1,5 +1,5 @@
 {
-  "name": "webgpu-distributed-training",
+  "name": "bitresearch",
   "version": "0.1.0",
   "description": "Distributed GPT training across WebGPU browser workers",
   "type": "module",

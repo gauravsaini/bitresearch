@@ -5,38 +5,84 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
+import crypto from 'crypto';
 
 interface RegisteredPeer {
   id: string;
   ws: WebSocket;
   joinedAt: number;
   ringPosition: number;
+  room: string;             // room/session ID for isolated swarms
 }
 
 const PORT = parseInt(process.env.SIGNALING_PORT || '8788');
 const MIN_PEERS_FOR_RING = 2;
 
-const peers = new Map<string, RegisteredPeer>();
+// Map of room -> peers in that room
+const rooms = new Map<string, Map<string, RegisteredPeer>>();
 let ringVersion = 0;
+
+// ── TURN Server HMAC Credential Rotation ──────────────────────
+
+const TURN_SECRET = process.env.TURN_SECRET || 'default-turn-secret-change-me';
+const TURN_REALM = process.env.TURN_REALM || 'bitresearch.training';
+const TURN_HOST = process.env.TURN_HOST || 'localhost';
+const TURN_PORT_NUM = parseInt(process.env.TURN_PORT || '3478');
+const CREDENTIAL_TTL_SECONDS = parseInt(process.env.TURN_CRED_TTL || '86400'); // 24h
+
+interface TurnCredentials {
+  username: string;
+  credential: string;
+  urls: string[];
+  expiresAt: number;
+}
+
+function generateTurnCredentials(peerId: string): TurnCredentials {
+  const expiresAt = Math.floor(Date.now() / 1000) + CREDENTIAL_TTL_SECONDS;
+  const username = `${expiresAt}:${peerId}`;
+  const hmac = crypto.createHmac('sha1', TURN_SECRET);
+  hmac.update(username);
+  const credential = hmac.digest('base64');
+
+  return {
+    username,
+    credential,
+    urls: [
+      `turn:${TURN_HOST}:${TURN_PORT_NUM}?transport=udp`,
+      `turn:${TURN_HOST}:${TURN_PORT_NUM}?transport=tcp`,
+    ],
+    expiresAt,
+  };
+}
 
 function log(msg: string): void {
   const ts = new Date().toISOString().slice(11, 19);
   console.log(`[${ts}] ${msg}`);
 }
 
+function getRoom(roomId: string): Map<string, RegisteredPeer> {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, new Map());
+  }
+  return rooms.get(roomId)!;
+}
+
 // ── Ring Topology ─────────────────────────────────────────────
 
-function formRing(): void {
+const ringFormTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function formRing(roomId: string): void {
+  const peers = getRoom(roomId);
   const peerList = Array.from(peers.values()).sort((a, b) => a.id.localeCompare(b.id));
 
   if (peerList.length < MIN_PEERS_FOR_RING) {
-    log(`⏳ ${peerList.length} peers registered, need ${MIN_PEERS_FOR_RING} for ring`);
+    log(`⏳ Room ${roomId}: ${peerList.length} peers, need ${MIN_PEERS_FOR_RING} for ring`);
     return;
   }
 
   ringVersion++;
   const N = peerList.length;
-  log(`\n🔗 Forming ring v${ringVersion} with ${N} peers:`);
+  log(`\n🔗 Room ${roomId}: Forming ring v${ringVersion} with ${N} peers:`);
 
   for (let i = 0; i < N; i++) {
     const peer = peerList[i];
@@ -46,7 +92,9 @@ function formRing(): void {
 
     log(`   [${i}] ${peer.id.slice(-8)} ← ${peerList[leftIdx].id.slice(-8)} → ${peerList[rightIdx].id.slice(-8)}`);
 
-    // Tell each peer about its neighbors
+    // Send ring topology + TURN credentials
+    const turnCreds = generateTurnCredentials(peer.id);
+
     sendToPeer(peer.ws, {
       type: 'ring-topology',
       position: i,
@@ -55,10 +103,11 @@ function formRing(): void {
       rightPeer: peerList[rightIdx].id,
       ringVersion,
       allPeers: peerList.map(p => ({ id: p.id, position: p.ringPosition })),
+      turnServers: turnCreds,
     });
   }
 
-  log(`✅ Ring v${ringVersion} formed\n`);
+  log(`✅ Room ${roomId}: Ring v${ringVersion} formed\n`);
 }
 
 function sendToPeer(ws: WebSocket, msg: any): void {
@@ -73,19 +122,31 @@ const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   if (req.url === '/status') {
+    const allPeers: any[] = [];
+    for (const [roomId, peers] of rooms) {
+      for (const p of peers.values()) {
+        allPeers.push({ id: p.id, room: roomId, position: p.ringPosition, joinedAt: p.joinedAt });
+      }
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      peers: Array.from(peers.values()).map(p => ({
-        id: p.id,
-        position: p.ringPosition,
-        joinedAt: p.joinedAt,
-      })),
+      rooms: Array.from(rooms.keys()),
+      peers: allPeers,
       ringVersion,
-      totalPeers: peers.size,
+      totalPeers: allPeers.length,
     }));
+  } else if (req.url?.startsWith('/turn-credentials')) {
+    // REST endpoint for managed TURN credential rotation
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    const peerId = url.searchParams.get('peerId') || 'anonymous';
+    const creds = generateTurnCredentials(peerId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(creds));
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`WebRTC Signaling Server | ${peers.size} peers | ring v${ringVersion}`);
+    let totalPeers = 0;
+    for (const peers of rooms.values()) totalPeers += peers.size;
+    res.end(`WebRTC Signaling Server | ${totalPeers} peers | ${rooms.size} rooms | ring v${ringVersion}`);
   }
 });
 
@@ -93,6 +154,7 @@ const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws: WebSocket) => {
   let peerId: string | null = null;
+  let roomId: string = 'default';
 
   ws.on('message', (data: Buffer) => {
     try {
@@ -101,29 +163,34 @@ wss.on('connection', (ws: WebSocket) => {
       switch (msg.type) {
         case 'register': {
           peerId = msg.peerId;
+          roomId = msg.room || 'default';
+          const peers = getRoom(roomId);
+
           peers.set(peerId!, {
             id: peerId!,
             ws,
             joinedAt: Date.now(),
             ringPosition: -1,
+            room: roomId,
           });
-          log(`✅ Peer registered: ${peerId!.slice(-8)} (${peers.size} total)`);
+          log(`✅ Peer registered: ${peerId!.slice(-8)} in room ${roomId} (${peers.size} total)`);
 
-          // Reform ring with new peer
-          clearTimeout(ringFormTimer);
-          ringFormTimer = setTimeout(() => formRing(), 1500);
+          // Reform ring with new peer (debounced per room)
+          clearTimeout(ringFormTimers.get(roomId));
+          ringFormTimers.set(roomId, setTimeout(() => formRing(roomId), 1500));
           break;
         }
 
         case 'offer':
         case 'answer':
         case 'ice-candidate': {
-          // Relay to target peer
-          const target = peers.get(msg.targetPeerId);
-          if (target) {
-            sendToPeer(target.ws, msg);
-          } else {
-            log(`⚠️ Target peer ${msg.targetPeerId?.slice(-8)} not found for ${msg.type}`);
+          // Relay to target peer (search across all rooms)
+          for (const peers of rooms.values()) {
+            const target = peers.get(msg.targetPeerId);
+            if (target) {
+              sendToPeer(target.ws, msg);
+              break;
+            }
           }
           break;
         }
@@ -137,28 +204,36 @@ wss.on('connection', (ws: WebSocket) => {
   });
 
   ws.on('close', () => {
-    if (peerId && peers.has(peerId)) {
-      peers.delete(peerId);
-      log(`👋 Peer left: ${peerId.slice(-8)} (${peers.size} remaining)`);
+    if (peerId) {
+      const peers = getRoom(roomId);
+      if (peers.has(peerId)) {
+        peers.delete(peerId);
+        log(`👋 Peer left: ${peerId.slice(-8)} from room ${roomId} (${peers.size} remaining)`);
 
-      // Notify others
-      for (const peer of peers.values()) {
-        sendToPeer(peer.ws, {
-          type: 'peer-left',
-          peerId,
-        });
-      }
+        // Notify others in the same room
+        for (const peer of peers.values()) {
+          sendToPeer(peer.ws, {
+            type: 'peer-left',
+            peerId,
+          });
+        }
 
-      // Reform ring without this peer
-      if (peers.size >= MIN_PEERS_FOR_RING) {
-        clearTimeout(ringFormTimer);
-        ringFormTimer = setTimeout(() => formRing(), 1000);
+        // Reform ring without this peer
+        if (peers.size >= MIN_PEERS_FOR_RING) {
+          clearTimeout(ringFormTimers.get(roomId));
+          ringFormTimers.set(roomId, setTimeout(() => formRing(roomId), 1000));
+        }
+
+        // Clean up empty rooms
+        if (peers.size === 0) {
+          rooms.delete(roomId);
+          clearTimeout(ringFormTimers.get(roomId));
+          ringFormTimers.delete(roomId);
+        }
       }
     }
   });
 });
-
-let ringFormTimer: ReturnType<typeof setTimeout>;
 
 server.listen(PORT, () => {
   console.log(`
@@ -168,9 +243,11 @@ server.listen(PORT, () => {
 ║                                                           ║
 ║  WebSocket: ws://localhost:${PORT}                          ║
 ║  Status:    http://localhost:${PORT}/status                  ║
+║  TURN Creds: http://localhost:${PORT}/turn-credentials       ║
 ║                                                           ║
 ║  This server only relays WebRTC signaling messages.       ║
 ║  All training data flows peer-to-peer via WebRTC.         ║
+║  Supports room-based isolated swarms.                     ║
 ║                                                           ║
 ║  Waiting for peers to register...                         ║
 ╚═══════════════════════════════════════════════════════════╝

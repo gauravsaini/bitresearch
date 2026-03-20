@@ -10,6 +10,7 @@ export default defineConfig({
         worker: fileURLToPath(new URL('./worker.html', import.meta.url)),
         p2p: fileURLToPath(new URL('./p2p.html', import.meta.url)),
         validate: fileURLToPath(new URL('./validate.html', import.meta.url)),
+        checkpoint: fileURLToPath(new URL('./checkpoint-test.html', import.meta.url)),
       },
     },
   },
