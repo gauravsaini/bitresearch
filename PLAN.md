@@ -2,9 +2,9 @@
 
 > Port Karpathy's autoresearch training loop to a browser-native WebGPU/WebRTC stack without losing the high-value training semantics.
 
-## Current Focus — Karpathy Parity (2026-03-21)
+## Current Focus — Verified Reference Refresh for the Value-Embedding Model (2026-03-21)
 
-Primary goal: keep closing the implementation gap against `karpathy/autoresearch` while preserving the browser-first architecture.
+Primary goal: keep `public/reference/` regenerated and verifiable for the current value-embedding / `ve_gate` model shape, with a reproducible validation path that does not depend on flaky headless-browser GPU behavior.
 
 ### Completed Parity Workstreams
 
@@ -40,7 +40,8 @@ Primary goal: keep closing the implementation gap against `karpathy/autoresearch
 
 ### Next High-Value Gaps
 
-- [ ] Refresh `public/reference/` assets for the new model shape so forward/backward parity can be re-established, not just safely skipped.
+- [x] Refresh `public/reference/` assets for the new value-embedding model shape so forward/backward parity can be re-established, not just safely skipped.
+- [x] Add a repo-facing refresh path for regenerating and validating the reference bundle.
 - [ ] Decide whether browser training should stay stream-based on concatenated shard bins or grow a manifest-driven document mode for exact document-boundary splits at runtime.
 - [ ] Revisit optimizer parity beyond Adam scheduling if we want a closer analogue to Karpathy’s `MuonAdamW`.
 - [ ] Add profile-guided memory checks for larger parity corpora in real browser sessions.
@@ -53,10 +54,10 @@ Primary goal: keep closing the implementation gap against `karpathy/autoresearch
 
 ## Near-Term Execution Order
 
-1. Refresh and verify reference assets against the value-embedding/windowed model.
-2. Run a real browser training smoke test against the parity manifest bundle.
-3. Evaluate whether the runtime should preserve per-document boundaries instead of concatenating shard streams.
-4. Continue optimizer and memory-profile parity work only after the data/reference path is stable.
+1. Run a real browser training smoke test against the parity manifest bundle.
+2. Evaluate whether the runtime should preserve per-document boundaries instead of concatenating shard streams.
+3. Continue optimizer and memory-profile parity work only after the data/reference path is stable.
+4. Investigate the headless Chrome SwiftShader/WebGPU loss anomaly separately from the validated Node parity path.
 
 ## Production Roadmap
 
@@ -64,8 +65,8 @@ Primary goal: keep closing the implementation gap against `karpathy/autoresearch
 
 - [x] Browser-side validation harness exists.
 - [x] Reference coverage checker exists.
-- [ ] Regenerate reference tensors for the current model.
-- [ ] Add a one-command refresh workflow for reference assets.
+- [x] Regenerate `public/reference/` tensors for the current value-embedding model.
+- [x] Add repo commands for exporting, checking, and validating reference assets.
 
 ### Priority 2: Distributed Training Robustness
 

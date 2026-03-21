@@ -4,3 +4,5 @@ node_modules
 public/reference/
 rustbpe-wasm
 TIMELINE.md
+__pycache__/
+*.pyc

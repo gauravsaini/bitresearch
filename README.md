@@ -59,6 +59,8 @@ The core infrastructure and WebRTC ring topology are implemented. To make this p
 
 *(See `PLAN.md` for detailed technical TODOs).*
 
+Current parity work is centered on keeping `public/reference/` in sync with the newer value-embedding model and validating it reproducibly outside flaky headless-browser GPU paths.
+
 ## How to Run
 
 ### Requirements
@@ -107,6 +109,18 @@ Before running it, place extracted `shard_*.txt` files under `~/.cache/autoresea
 ```bash
 PREPARE_WASM_TOKENIZE_SHARDS=1 pnpm run prepare:data
 ```
+
+### Reference Bundle Workflow
+
+`public/reference/` holds the validation bundle used by `src/model/validate.ts`. The repo-local workflow is:
+
+```bash
+pnpm run reference:export
+pnpm run reference:check
+pnpm run reference:validate
+```
+
+`reference:export` regenerates the bundle with the standalone PyTorch exporter, `reference:check` verifies the file layout and tensor coverage, and `reference:validate` runs a Node/TFJS parity pass against the exported weights, logits, loss, and gradients. The browser `validate.html` page is still useful interactively, but the Node validator is the most reliable non-interactive check.
 
 **More options:**
 

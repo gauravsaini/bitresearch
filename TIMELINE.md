@@ -46,6 +46,20 @@
 
 ## UPDATED ON : 2026-03-21
 
+### Feature — Reference Bundle Refresh Prep
+
+1. **Current focus**: The repo is now centered on keeping `public/reference/` current for the newer value-embedding / `ve_gate` model shape and validating it through a repeatable repo workflow.
+
+2. **PyTorch export path**: Added `scripts/export_reference.py`, a standalone PyTorch exporter derived from the earlier parity workflow and updated for value embeddings, `ve_gate`, and windowed attention. It rewrites `weights.bin`, `grads.bin`, `logits.bin`, `loss.json`, and metadata under `public/reference/`.
+
+3. **Repo-facing validation workflow**: Added `pnpm run reference:export`, `pnpm run reference:check`, and `pnpm run reference:validate`. The new Node validator (`scripts/validate_reference_node.ts`) checks forward loss, logits, and gradients against the exported bundle without relying on headless browser GPU behavior.
+
+4. **Validation result**: The refreshed bundle now passes the structural checker (`32/32` weights and gradients matched) and the Node/TFJS parity validator. Headless Chrome with SwiftShader/WebGPU still shows a loss anomaly despite exact logits, so that backend-specific issue is tracked separately from the reference-bundle refresh itself.
+
+5. **Tracking update**: `README.md`, `PLAN.md`, and this timeline now reflect the completed refresh workflow and the remaining headless-browser follow-up.
+
+**Files changed**: `scripts/export_reference.py`, `scripts/validate_reference_node.ts`, `package.json`, `README.md`, `PLAN.md`, `TIMELINE.md`
+
 ### Feature — Karpathy Parity Push
 
 1. **Gap assessment completed**: Compared current `bitresearch` against a fresh local clone of `karpathy/autoresearch` and identified the highest-value missing pieces: BOS-packed dataloading, exact BPB, sliding-window attention semantics, value embeddings / gated value residuals, GQA correctness, and richer tokenizer artifacts.

@@ -39,7 +39,12 @@ export class GPTModel {
       await tf.setBackend('webgpu');
     } catch (e) {
       console.warn('WebGPU not supported or failed to initialize. Falling back to WebGL.');
-      await tf.setBackend('webgl');
+      try {
+        await tf.setBackend('webgl');
+      } catch {
+        console.warn('WebGL backend not available. Falling back to CPU.');
+        await tf.setBackend('cpu');
+      }
     }
     await tf.ready();
 
