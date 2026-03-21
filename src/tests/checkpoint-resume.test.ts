@@ -185,8 +185,10 @@ export async function runCheckpointTest(): Promise<{
     trainer1 = new TestableTrainer({
       modelConfig: TEST_CONFIG,
       batchSize: 2,
-      learningRate: 0.001,
-      warmupSteps: 3,
+      unembedding_lr: 0.004,
+      embedding_lr: 0.6,
+      matrix_lr: 0.04,
+      scalar_lr: 0.5,
       maxSteps: 100,
       checkpointInterval: 0,
       dataUrl: '',          // synthetic data — no network
@@ -223,8 +225,10 @@ export async function runCheckpointTest(): Promise<{
     trainer2 = new TestableTrainer({
       modelConfig: TEST_CONFIG,
       batchSize: 2,
-      learningRate: 0.001,
-      warmupSteps: 3,
+      unembedding_lr: 0.004,
+      embedding_lr: 0.6,
+      matrix_lr: 0.04,
+      scalar_lr: 0.5,
       maxSteps: 100,
       checkpointInterval: 0,
       dataUrl: '',
