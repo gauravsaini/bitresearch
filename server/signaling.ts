@@ -139,6 +139,16 @@ const server = http.createServer((req, res) => {
       }
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
+    const swarmStatus: any = {};
+    for (const [roomId, swarm] of swarmRooms) {
+      swarmStatus[roomId] = {
+        totalVariants: swarm.variants.length,
+        completed: swarm.completedIds.size,
+        results: swarm.results.length,
+        bestScore: swarm.results[0]?.metrics?.sharpe ?? swarm.results[0]?.metrics?.score ?? null,
+        elapsedMs: Date.now() - swarm.startTime,
+      };
+    }
     res.end(JSON.stringify({
       rooms: Array.from(rooms.keys()),
       peers: allPeers,
@@ -146,6 +156,7 @@ const server = http.createServer((req, res) => {
       totalPeers: allPeers.length,
       computePeers: computeCount,
       observerPeers: allPeers.length - computeCount,
+      swarms: swarmStatus,
     }));
   } else if (req.url?.startsWith('/turn-credentials')) {
     // REST endpoint for managed TURN credential rotation
@@ -216,6 +227,32 @@ wss.on('connection', (ws: WebSocket) => {
           break;
         }
 
+        // ── Work Distribution (swarm mode) ──
+        case 'swarm-init': {
+          // Initialize swarm work distribution for a room
+          if (msg.variants && Array.isArray(msg.variants)) {
+            activateSwarm(roomId, msg.variants, msg.chunkSize || 5);
+            // Start assigning work to all compute peers
+            const peers = getRoom(roomId);
+            for (const p of peers.values()) {
+              if (p.peerType === 'compute') {
+                assignSwarmChunk(roomId, p.id);
+              }
+            }
+          }
+          break;
+        }
+
+        case 'swarm-request-work': {
+          if (peerId) assignSwarmChunk(roomId, peerId);
+          break;
+        }
+
+        case 'swarm-result': {
+          if (peerId) handleSwarmResult(roomId, peerId, msg.result);
+          break;
+        }
+
         default:
           log(`Unknown message type: ${msg.type}`);
       }
@@ -257,6 +294,119 @@ wss.on('connection', (ws: WebSocket) => {
     }
   });
 });
+
+// ════════════════════════════════════════════════════════════════
+// Work Distribution Mode (opt-in for swarm rooms)
+// ════════════════════════════════════════════════════════════════
+// When activated, the server assigns work chunks to compute peers
+// and collects results. This is an alternative to ring all-reduce
+// for use cases like strategy optimization where each peer runs
+// independent experiments.
+
+interface SwarmRoom {
+  variants: any[];
+  completedIds: Set<number>;
+  results: any[];
+  chunkSize: number;
+  startTime: number;
+}
+
+const swarmRooms = new Map<string, SwarmRoom>();
+
+function activateSwarm(roomId: string, variants: any[], chunkSize = 5): void {
+  swarmRooms.set(roomId, {
+    variants,
+    completedIds: new Set(),
+    results: [],
+    chunkSize,
+    startTime: Date.now(),
+  });
+  log(`🐝 Swarm activated in room ${roomId}: ${variants.length} variants, chunk size ${chunkSize}`);
+}
+
+function assignSwarmChunk(roomId: string, peerId: string): void {
+  const swarm = swarmRooms.get(roomId);
+  const peers = getRoom(roomId);
+  const peer = peers.get(peerId);
+  if (!swarm || !peer || peer.peerType !== 'compute') return;
+
+  // Find variants already assigned to other compute peers
+  const assignedAll = new Set<number>();
+  for (const p of peers.values()) {
+    if (p.peerType !== 'compute' || p.id === peerId) continue;
+    // Track assigned chunks per peer (stored in room context)
+  }
+
+  // Find next uncompleted variant
+  let nextIdx = -1;
+  for (let i = 0; i < swarm.variants.length; i++) {
+    if (!swarm.completedIds.has(i)) {
+      nextIdx = i;
+      break;
+    }
+  }
+
+  if (nextIdx === -1) {
+    sendToPeer(peer.ws, { type: 'swarm-no-work' });
+    return;
+  }
+
+  // Assign a chunk of variants
+  const chunk = swarm.variants.slice(nextIdx, nextIdx + swarm.chunkSize);
+  sendToPeer(peer.ws, {
+    type: 'swarm-assignment',
+    chunkStart: nextIdx,
+    variants: chunk,
+  });
+}
+
+function handleSwarmResult(roomId: string, peerId: string, result: any): void {
+  const swarm = swarmRooms.get(roomId);
+  if (!swarm) return;
+
+  const variantId = result?.params?.id;
+  if (variantId === undefined) return;
+
+  swarm.completedIds.add(variantId);
+  swarm.results.push(result);
+
+  // Sort by score (descending)
+  swarm.results.sort((a: any, b: any) => (b.metrics?.sharpe ?? b.metrics?.score ?? 0) - (a.metrics?.sharpe ?? a.metrics?.score ?? 0));
+
+  const best = swarm.results[0];
+  const progress = swarm.completedIds.size;
+
+  // Broadcast progress to ALL peers in room (compute + observer)
+  const peers = getRoom(roomId);
+  for (const peer of peers.values()) {
+    sendToPeer(peer.ws, {
+      type: 'swarm-progress',
+      totalCompleted: progress,
+      totalVariants: swarm.variants.length,
+      bestScore: best?.metrics?.sharpe ?? best?.metrics?.score ?? 0,
+      bestVariant: best?.params?.description ?? '',
+      result,
+      peerId,
+    });
+  }
+
+  // Check if all done
+  if (progress >= swarm.variants.length) {
+    log(`🎉 Room ${roomId}: All ${swarm.variants.length} variants complete!`);
+    for (const peer of peers.values()) {
+      sendToPeer(peer.ws, {
+        type: 'swarm-complete',
+        results: swarm.results.slice(0, 20),
+      });
+    }
+  }
+
+  // Auto-assign next chunk to the reporting peer
+  assignSwarmChunk(roomId, peerId);
+}
+
+// Handle swarm messages in the WebSocket handler
+const originalMessageHandler = wss.listeners('connection')[0] as any;
 
 server.listen(PORT, () => {
   console.log(`
