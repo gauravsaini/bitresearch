@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Swarm Observer</title>
+  <style>
+    body { font-family:'Inter',sans-serif; background:#0a0b0f; color:#e8eaf0; padding:20px; }
+    h1 { font-size:1.4em; color:#34d399; }
+    .stat { font-size:2em; font-weight:700; }
+    .bar { background:#1a1a2e; height:6px; border-radius:3px; margin:8px 0; overflow:hidden; }
+    .bar-fill { background:#34d399; height:100%; transition:width 0.5s; }
+    table { width:100%; border-collapse:collapse; font-size:0.8em; margin-top:20px; }
+    th { text-align:left; color:#8b8fa4; padding:6px; border-bottom:1px solid rgba(255,255,255,0.06); }
+    td { padding:5px; border-bottom:1px solid rgba(255,255,255,0.03); }
+    .good { color:#34d399; }
+    .log { background:#0d0d0d; border:1px solid rgba(255,255,255,0.05); border-radius:6px; padding:10px; max-height:200px; overflow-y:auto; font:0.75em monospace; color:#8b8fa4; }
+  </style>
+</head>
+<body>
+  <h1>🐝 Swarm Observer</h1>
+  <p style="color:#8b8fa4; margin-bottom:20px">Dashboard — monitoring distributed strategy research</p>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px;">
+    <div>
+      <div style="color:#8b8fa4; font-size:0.75em; text-transform:uppercase;">Progress</div>
+      <div class="stat" id="progress">0 / 0</div>
+      <div class="bar"><div class="bar-fill" id="bar" style="width:0%"></div></div>
+    </div>
+    <div>
+      <div style="color:#8b8fa4; font-size:0.75em; text-transform:uppercase;">Best Sharpe</div>
+      <div class="stat good" id="best">—</div>
+      <div id="best-desc" style="font-size:0.8em; color:#8b8fa4"></div>
+    </div>
+    <div>
+      <div style="color:#8b8fa4; font-size:0.75em; text-transform:uppercase;">Peers</div>
+      <div class="stat" id="peers">0</div>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>#</th><th>Sharpe</th><th>Max DD</th><th>Peer</th><th>Variant</th></tr></thead>
+    <tbody id="results"><tr><td colspan="5" style="color:#555">Connecting...</td></tr></tbody>
+  </table>
+
+  <div class="log" id="log" style="margin-top:20px"></div>
+
+  <script>
+    const ws = new WebSocket(`ws://${location.hostname}:8788`);
+    const peerId = `observer-${Math.random().toString(36).slice(2,8)}`;
+    const results = [];
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type:'register', peerId, peerType:'observer', room:'swarm' }));
+      document.getElementById('log').innerHTML += '<div>Connected as observer</div>';
+    };
+
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'swarm-progress') {
+        document.getElementById('progress').textContent = `${msg.totalCompleted} / ${msg.totalVariants}`;
+        document.getElementById('bar').style.width = `${msg.totalCompleted/msg.totalVariants*100}%`;
+        document.getElementById('best').textContent = msg.bestScore?.toFixed(4) || '—';
+        document.getElementById('best-desc').textContent = msg.bestVariant || '';
+
+        if (msg.result) {
+          results.push(msg.result);
+          results.sort((a,b) => (b.metrics?.sharpe??0) - (a.metrics?.sharpe??0));
+          document.getElementById('results').innerHTML = results.slice(0,20).map((r,i) =>
+            `<tr><td>${i+1}</td><td class="${r.metrics.sharpe>1?'good':''}">${r.metrics.sharpe.toFixed(4)}</td><td>${r.metrics.max_drawdown.toFixed(4)}</td><td>${(r.peerId||'').slice(-6)}</td><td>${r.params.description}</td></tr>`
+          ).join('');
+        }
+      }
+      if (msg.type === 'swarm-complete') {
+        document.getElementById('log').innerHTML += '<div style="color:#34d399">🎉 SWARM COMPLETE</div>';
+      }
+    };
+  </script>
+</body>
+</html>

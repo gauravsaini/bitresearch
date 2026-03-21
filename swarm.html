@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Swarm Worker — Distributed Strategy Research</title>
+  <meta name="description" content="Browser-based swarm worker for distributed financial strategy optimization">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0a0b0f; --card: rgba(20,22,32,0.85); --text: #e8eaf0; --dim: #8b8fa4;
+      --green: #34d399; --blue: #4f8cff; --purple: #a78bfa; --red: #f87171;
+      --border: rgba(255,255,255,0.06); --mono: 'JetBrains Mono', monospace;
+    }
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Inter',sans-serif; background:var(--bg); color:var(--text); padding:20px; }
+    h1 { font-size:1.4em; margin-bottom:4px; color:var(--green); }
+    h2 { font-size:0.9em; color:var(--dim); margin-bottom:20px; font-weight:normal; }
+    .grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; margin-bottom:20px; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
+    .card h3 { font-size:0.75em; text-transform:uppercase; letter-spacing:1px; color:var(--dim); margin-bottom:8px; }
+    .stat { font-size:1.8em; font-weight:700; }
+    .stat-label { font-size:0.7em; color:var(--dim); margin-top:2px; }
+    .bar { background:#1a1a2e; height:6px; border-radius:3px; margin-top:8px; overflow:hidden; }
+    .bar-fill { background:var(--green); height:100%; transition:width 0.5s; border-radius:3px; }
+    table { width:100%; border-collapse:collapse; font-size:0.75em; }
+    th { text-align:left; color:var(--dim); padding:6px 4px; border-bottom:1px solid var(--border); }
+    td { padding:5px 4px; border-bottom:1px solid rgba(255,255,255,0.03); }
+    .good { color:var(--green); }
+    .bad { color:var(--red); }
+    .log { background:#0d0d0d; border:1px solid rgba(255,255,255,0.05); border-radius:6px; padding:10px; max-height:180px; overflow-y:auto; font:0.7em var(--mono); color:var(--dim); }
+    .log-entry { margin-bottom:3px; }
+    .full { grid-column:1/-1; }
+    button { background:var(--green); color:#000; border:none; padding:8px 20px; border-radius:6px; font-weight:600; cursor:pointer; font-family:inherit; }
+    button:hover { opacity:0.9; }
+    button:disabled { background:#333; color:#666; cursor:default; }
+    .stage { font-size:0.65em; color:var(--purple); }
+  </style>
+</head>
+
+<body>
+  <h1>🐝 Swarm Worker</h1>
+  <h2>Browser-based distributed strategy research — like bitresearch's P2P training, but for financial strategies</h2>
+
+  <div class="grid">
+    <div class="card">
+      <h3>Your Peer</h3>
+      <div id="join-area">
+        <button id="btn-join" onclick="joinSwarm()">🐝 Join Swarm</button>
+      </div>
+      <div id="peer-info" style="display:none">
+        <div class="stat" style="font-size:1em;" id="peer-id">—</div>
+        <div class="stat-label">peer id</div>
+        <div style="margin-top:8px">
+          <div class="stat-label">Variants computed: <span id="my-count" style="color:#fff">0</span></div>
+          <div class="stat-label">Current variant: <span id="current-variant" style="color:#fff">—</span></div>
+          <div class="stat-label stage" id="current-stage"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Swarm Progress</h3>
+      <div class="stat" id="progress-text">0 / 0</div>
+      <div class="stat-label">variants completed</div>
+      <div class="bar"><div class="bar-fill" id="progress-fill" style="width:0%"></div></div>
+      <div style="margin-top:8px">
+        <div class="stat-label">Peers: <span id="peers-count" style="color:#fff">0</span></div>
+        <div class="stat-label">Est remaining: <span id="est-time" style="color:#fff">—</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Best Result</h3>
+      <div class="stat good" id="best-score">—</div>
+      <div class="stat-label">sharpe ratio</div>
+      <div style="margin-top:8px; font-size:0.8em; color:var(--dim)" id="best-variant">Waiting...</div>
+    </div>
+
+    <div class="card full">
+      <h3>Top Results</h3>
+      <table>
+        <thead><tr><th>#</th><th>Sharpe</th><th>MC Mean</th><th>CI 95%</th><th>Max DD</th><th>Peer</th><th>Variant</th></tr></thead>
+        <tbody id="results-body"><tr><td colspan="7" style="color:#555">Waiting for results...</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="card full">
+      <h3>Activity Log</h3>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    // ═══════════════════════════════════════════════════════════
+    // Configuration
+    // ═══════════════════════════════════════════════════════════
+    const MC_PATHS = 50000;
+    const MC_STEPS = 252;
+    const ANNUAL = 252;
+
+    const params = new URLSearchParams(location.search);
+    const autoStart = params.has('autoStart');
+    const hideUI = params.has('hideUI') || params.has('noui');
+    const signalingUrl = `ws://${location.hostname}:8788`;
+
+    let ws = null;
+    let peerId = `browser-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`;
+    let myCount = 0;
+    const topResults = [];
+
+    // ═══════════════════════════════════════════════════════════
+    // Monte Carlo + Strategy Engine (plain JS, no WebGPU)
+    // ═══════════════════════════════════════════════════════════
+
+    function randn() {
+      let u = 0, v = 0;
+      while (u === 0) u = Math.random();
+      while (v === 0) v = Math.random();
+      return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    }
+
+    function rsi(prices, period) {
+      const result = [];
+      let avgGain = 0, avgLoss = 0;
+      for (let i = 1; i <= period; i++) {
+        const c = prices[i] - prices[i-1];
+        if (c > 0) avgGain += c; else avgLoss += Math.abs(c);
+      }
+      avgGain /= period; avgLoss /= period;
+      for (let i = 0; i < period; i++) result.push(50);
+      result.push(avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss));
+      for (let i = period + 1; i < prices.length; i++) {
+        const c = prices[i] - prices[i-1];
+        avgGain = (avgGain * (period-1) + (c > 0 ? c : 0)) / period;
+        avgLoss = (avgLoss * (period-1) + (c < 0 ? -c : 0)) / period;
+        result.push(avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss));
+      }
+      return result;
+    }
+
+    function computeSharpe(returns) {
+      if (returns.length < 10) return -9;
+      const shifted = [0, ...returns.slice(0, returns.length-1)];
+      const n = shifted.length;
+      const m = shifted.reduce((a,b) => a+b, 0) / n;
+      const v = shifted.reduce((a,r) => a + (r-m)**2, 0) / n;
+      const s = Math.sqrt(v);
+      return s > 1e-9 ? (m / s) * Math.sqrt(ANNUAL) : -9;
+    }
+
+    function computeFullMetrics(returns) {
+      const shifted = [0, ...returns.slice(0, returns.length-1)];
+      const n = shifted.length;
+      const m = shifted.reduce((a,b) => a+b, 0) / n;
+      const v = shifted.reduce((a,r) => a + (r-m)**2, 0) / n;
+      const s = Math.sqrt(v);
+      const sharpe = s > 1e-9 ? (m / s) * Math.sqrt(ANNUAL) : -9;
+      let cum = 1, peak = 1, maxDD = 0, wins = 0;
+      for (const r of shifted) {
+        cum *= 1 + r;
+        if (cum > peak) peak = cum;
+        const dd = (cum - peak) / peak;
+        if (dd < maxDD) maxDD = dd;
+        if (r > 0) wins++;
+      }
+      const calmar = Math.abs(maxDD) > 1e-9 ? (m * ANNUAL) / Math.abs(maxDD) : -9;
+      return {
+        sharpe: Math.round(sharpe * 1e6) / 1e6,
+        calmar: Math.round(calmar * 1e6) / 1e6,
+        max_drawdown: Math.round(maxDD * 1e6) / 1e6,
+        win_rate: Math.round((wins/n) * 1e4) / 1e4,
+        total_return: Math.round((cum-1) * 1e4) / 1e4,
+      };
+    }
+
+    function computeStrategyReturns(params, data) {
+      const signalClose = data[params.signalTicker];
+      const rsiPeriod = params.rsiPeriod || 14;
+      const longT = params.longThreshold || 38;
+      const shortT = params.shortThreshold || 62;
+      const scaleDenom = shortT - 50;
+      const universe = params.universe || ['SPY'];
+      const momentum = params.momentumConfirm || false;
+      const rsiVals = rsi(signalClose, rsiPeriod);
+      const returns = [];
+
+      for (let i = 2; i < signalClose.length; i++) {
+        const rsiVal = rsiVals[i-1];
+        const prevRet = (signalClose[i-1] - signalClose[i-2]) / signalClose[i-2];
+        let pos = 0;
+        if (momentum) {
+          if (rsiVal < longT && prevRet < 0) pos = Math.min((longT - rsiVal) / scaleDenom, 1);
+          else if (rsiVal > shortT && prevRet > 0) pos = -Math.min((rsiVal - shortT) / scaleDenom, 1);
+        } else {
+          if (rsiVal < longT) pos = Math.min((longT - rsiVal) / scaleDenom, 1);
+          else if (rsiVal > shortT) pos = -Math.min((rsiVal - shortT) / scaleDenom, 1);
+        }
+        let portfolioRet = 0;
+        if (pos !== 0) {
+          for (const t of universe) {
+            portfolioRet += (data[t][i] - data[t][i-1]) / data[t][i-1];
+          }
+          portfolioRet = portfolioRet / universe.length * pos;
+        }
+        returns.push(portfolioRet);
+      }
+      return returns;
+    }
+
+    // Monte Carlo: generate price paths, compute sharpe distribution
+    function monteCarloSharpe(baseReturns, nPaths, onProgress) {
+      const mu = baseReturns.reduce((a,b) => a+b, 0) / baseReturns.length * ANNUAL;
+      const variance = baseReturns.reduce((a,r) => a + (r - baseReturns.reduce((a,b) => a+b, 0)/baseReturns.length)**2, 0) / baseReturns.length;
+      const sigma = Math.sqrt(variance * ANNUAL);
+      const dt = 1 / ANNUAL;
+      const drift = (mu - 0.5 * sigma * sigma) * dt;
+      const diffusion = sigma * Math.sqrt(dt);
+
+      const sharpes = [];
+      for (let p = 0; p < nPaths; p++) {
+        const prices = [100];
+        for (let t = 1; t < MC_STEPS; t++) {
+          prices.push(prices[t-1] * Math.exp(drift + diffusion * randn()));
+        }
+        const rets = [];
+        for (let t = 1; t < prices.length; t++) {
+          rets.push((prices[t] - prices[t-1]) / prices[t-1]);
+        }
+        sharpes.push(computeSharpe(rets));
+        if (p % 5000 === 0) onProgress?.(p / nPaths);
+      }
+      return sharpes;
+    }
+
+    async function runVariant(variant, data, onProgress) {
+      const t0 = performance.now();
+      onProgress?.('base', 0);
+
+      // 1. Compute base returns
+      const baseReturns = computeStrategyReturns(variant, data);
+      const baseMetrics = computeFullMetrics(baseReturns);
+      onProgress?.('base', 20);
+
+      // 2. Monte Carlo simulation
+      onProgress?.('montecarlo', 20);
+      const mcSharpes = monteCarloSharpe(baseReturns, MC_PATHS, (pct) => {
+        onProgress?.('montecarlo', 20 + pct * 80);
+      });
+
+      // MC confidence intervals
+      mcSharpes.sort((a,b) => a - b);
+      const ciLow = mcSharpes[Math.floor(MC_PATHS * 0.05)];
+      const ciHigh = mcSharpes[Math.floor(MC_PATHS * 0.95)];
+      const mcMean = mcSharpes.reduce((a,b) => a+b, 0) / mcSharpes.length;
+      const mcStd = Math.sqrt(mcSharpes.reduce((a,x) => a + (x - mcMean)**2, 0) / mcSharpes.length);
+
+      onProgress?.('done', 100);
+
+      return {
+        params: variant,
+        metrics: {
+          ...baseMetrics,
+          sharpe_ci_low: Math.round(ciLow * 1e6) / 1e6,
+          sharpe_ci_high: Math.round(ciHigh * 1e6) / 1e6,
+          mc_mean_sharpe: Math.round(mcMean * 1e6) / 1e6,
+          mc_std_sharpe: Math.round(mcStd * 1e6) / 1e6,
+        },
+        peerId,
+        elapsedMs: Math.round(performance.now() - t0),
+      };
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // UI Helpers
+    // ═══════════════════════════════════════════════════════════
+
+    function addLog(msg) {
+      const el = document.getElementById('log');
+      const time = new Date().toISOString().slice(11, 19);
+      el.innerHTML += `<div class="log-entry">[${time}] ${msg}</div>`;
+      el.scrollTop = el.scrollHeight;
+      if (hideUI) console.log(msg);
+    }
+
+    function updateResults() {
+      const tbody = document.getElementById('results-body');
+      if (topResults.length === 0) return;
+      tbody.innerHTML = topResults.slice(0, 15).map((r, i) => {
+        const cls = r.metrics.sharpe > 1 ? 'good' : r.metrics.sharpe < 0 ? 'bad' : '';
+        const ci = r.metrics.sharpe_ci_low ? ` [${r.metrics.sharpe_ci_low.toFixed(2)}, ${r.metrics.sharpe_ci_high.toFixed(2)}]` : '';
+        return `<tr>
+          <td>${i+1}</td>
+          <td class="${cls}">${r.metrics.sharpe.toFixed(4)}</td>
+          <td>${r.metrics.mc_mean_sharpe?.toFixed(4) ?? '—'}</td>
+          <td>${ci}</td>
+          <td>${r.metrics.max_drawdown.toFixed(4)}</td>
+          <td>${(r.peerId||'').slice(-6)}</td>
+          <td>${r.params.description}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Data Loading
+    // ═══════════════════════════════════════════════════════════
+
+    let cachedData = null;
+
+    async function loadData() {
+      if (cachedData) return cachedData;
+      addLog('📂 Loading market data...');
+      const resp = await fetch('/data/val.json');
+      cachedData = await resp.json();
+      addLog(`📂 Data loaded: ${Object.keys(cachedData).join(', ')}`);
+      return cachedData;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Swarm Connection
+    // ═══════════════════════════════════════════════════════════
+
+    async function joinSwarm() {
+      const btn = document.getElementById('btn-join');
+      btn.disabled = true;
+      btn.textContent = 'Connecting...';
+
+      ws = new WebSocket(signalingUrl);
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'register', peerId, peerType: 'compute', room: 'swarm' }));
+        addLog(`✅ Connected as ${peerId.slice(-8)}`);
+        document.getElementById('peer-info').style.display = 'block';
+        document.getElementById('peer-id').textContent = peerId.slice(-8);
+        btn.style.display = 'none';
+      };
+
+      ws.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+
+        switch (msg.type) {
+          case 'ring-topology':
+          case 'ring-waiting':
+            addLog(`🔗 Ring: ${msg.computePeers ?? msg.totalPeers} compute peers`);
+            break;
+
+          case 'swarm-assignment': {
+            const variants = msg.variants;
+            addLog(`📦 Received chunk: ${msg.chunkStart}-${msg.chunkStart + variants.length - 1} (${variants.length} variants)`);
+
+            const data = await loadData();
+
+            for (const variant of variants) {
+              document.getElementById('current-variant').textContent = variant.description?.slice(0, 40) || `#${variant.id}`;
+              try {
+                const result = await runVariant(variant, data, (stage, pct) => {
+                  document.getElementById('current-stage').textContent = `${stage} ${Math.round(pct)}%`;
+                });
+                result.peerId = peerId;
+                ws.send(JSON.stringify({ type: 'swarm-result', result }));
+                myCount++;
+                document.getElementById('my-count').textContent = myCount;
+                addLog(`  ✓ #${variant.id} ${variant.description}: sharpe=${result.metrics.sharpe} MC=${result.metrics.mc_mean_sharpe}±${result.metrics.mc_std_sharpe} (${(result.elapsedMs/1000).toFixed(1)}s)`);
+              } catch (e) {
+                addLog(`  ✗ #${variant.id}: CRASH ${e.message}`);
+                ws.send(JSON.stringify({
+                  type: 'swarm-result',
+                  result: {
+                    params: variant,
+                    metrics: { sharpe: -9, calmar: -9, max_drawdown: -1, win_rate: 0, total_return: -1, sharpe_ci_low: -9, sharpe_ci_high: -9, mc_mean_sharpe: -9, mc_std_sharpe: 0 },
+                    peerId,
+                    elapsedMs: 0,
+                  }
+                }));
+              }
+            }
+
+            ws.send(JSON.stringify({ type: 'swarm-request-work' }));
+            break;
+          }
+
+          case 'swarm-no-work':
+            addLog('🏁 No more work. Waiting...');
+            document.getElementById('current-variant').textContent = 'idle';
+            document.getElementById('current-stage').textContent = '';
+            break;
+
+          case 'swarm-progress': {
+            const pct = Math.round(msg.totalCompleted / msg.totalVariants * 100);
+            document.getElementById('progress-text').textContent = `${msg.totalCompleted} / ${msg.totalVariants} (${pct}%)`;
+            document.getElementById('progress-fill').style.width = `${pct}%`;
+            document.getElementById('best-score').textContent = msg.bestScore?.toFixed(4) || '—';
+            document.getElementById('best-variant').textContent = msg.bestVariant || '';
+
+            if (msg.result) {
+              topResults.push(msg.result);
+              topResults.sort((a,b) => (b.metrics?.sharpe ?? 0) - (a.metrics?.sharpe ?? 0));
+              if (topResults.length > 50) topResults.length = 50;
+              updateResults();
+            }
+            break;
+          }
+
+          case 'swarm-complete':
+            addLog('🎉 SWARM COMPLETE!');
+            document.getElementById('current-variant').textContent = 'DONE';
+            break;
+
+          case 'peer-left':
+            addLog(`👋 Peer left. Reforming ring...`);
+            break;
+        }
+      };
+
+      ws.onerror = (err) => addLog(`❌ WebSocket error`);
+      ws.onclose = () => addLog('🔌 Disconnected');
+
+      // Request data config
+      try {
+        const configResp = await fetch('/data/config.json');
+        if (configResp.ok) {
+          const config = await configResp.json();
+          addLog(`📋 Config: ${config.variants?.length || '?'} variants`);
+        }
+      } catch {}
+    }
+
+    // Auto-start if configured
+    if (autoStart) {
+      setTimeout(() => joinSwarm(), 500);
+    }
+  </script>
+</body>
+</html>

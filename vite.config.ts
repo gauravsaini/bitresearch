@@ -9,6 +9,8 @@ export default defineConfig({
         main: fileURLToPath(new URL('./index.html', import.meta.url)),
         worker: fileURLToPath(new URL('./worker.html', import.meta.url)),
         p2p: fileURLToPath(new URL('./p2p.html', import.meta.url)),
+        swarm: fileURLToPath(new URL('./swarm.html', import.meta.url)),
+        observer: fileURLToPath(new URL('./observer.html', import.meta.url)),
         validate: fileURLToPath(new URL('./validate.html', import.meta.url)),
         checkpoint: fileURLToPath(new URL('./checkpoint-test.html', import.meta.url)),
       },

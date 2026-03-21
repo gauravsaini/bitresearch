@@ -18,7 +18,10 @@
     "train": "tsx scripts/launch.ts",
     "train:5": "tsx scripts/launch.ts --peers 5",
     "train:no-ui": "tsx scripts/launch.ts --no-ui",
-    "train:headless": "tsx scripts/launch.ts --no-ui --timeout 300"
+    "train:headless": "tsx scripts/launch.ts --no-ui --timeout 300",
+    "prepare:swarm": "tsx scripts/prepare_swarm.ts",
+    "swarm": "concurrently \"pnpm run dev:signaling\" \"pnpm run dev:client\"",
+    "swarm:headless": "tsx scripts/launch_swarm.ts --no-ui --timeout 300"
   },
   "dependencies": {
     "@petamoriken/float16": "^3.9.3",
