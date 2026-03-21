@@ -306,6 +306,7 @@ wss.on('connection', (ws: WebSocket) => {
 interface SwarmRoom {
   variants: any[];
   completedIds: Set<number>;
+  assignedIds: Set<number>;  // track in-progress assignments
   results: any[];
   chunkSize: number;
   startTime: number;
@@ -317,6 +318,7 @@ function activateSwarm(roomId: string, variants: any[], chunkSize = 5): void {
   swarmRooms.set(roomId, {
     variants,
     completedIds: new Set(),
+    assignedIds: new Set(),
     results: [],
     chunkSize,
     startTime: Date.now(),
@@ -330,17 +332,10 @@ function assignSwarmChunk(roomId: string, peerId: string): void {
   const peer = peers.get(peerId);
   if (!swarm || !peer || peer.peerType !== 'compute') return;
 
-  // Find variants already assigned to other compute peers
-  const assignedAll = new Set<number>();
-  for (const p of peers.values()) {
-    if (p.peerType !== 'compute' || p.id === peerId) continue;
-    // Track assigned chunks per peer (stored in room context)
-  }
-
-  // Find next uncompleted variant
+  // Find next unassigned and uncompleted variant
   let nextIdx = -1;
   for (let i = 0; i < swarm.variants.length; i++) {
-    if (!swarm.completedIds.has(i)) {
+    if (!swarm.completedIds.has(i) && !swarm.assignedIds.has(i)) {
       nextIdx = i;
       break;
     }
@@ -353,6 +348,10 @@ function assignSwarmChunk(roomId: string, peerId: string): void {
 
   // Assign a chunk of variants
   const chunk = swarm.variants.slice(nextIdx, nextIdx + swarm.chunkSize);
+  for (let i = nextIdx; i < nextIdx + chunk.length; i++) {
+    swarm.assignedIds.add(i);
+  }
+
   sendToPeer(peer.ws, {
     type: 'swarm-assignment',
     chunkStart: nextIdx,
