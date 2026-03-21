@@ -1,121 +1,152 @@
-# bitresearch
+# bitresearch — BTC/USD Trading Signal Generation
 
-This is an experiment to have the LLM do its own research.
+This is an experiment to train a GPT model to generate buy/sell signals from Bitstamp BTC/USD 1-minute OHLCV data.
 
 ## Setup
 
-To set up a new experiment, work with the user to:
+To set up a new experiment:
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar5`). The branch `bitresearch/<tag>` must not already exist — this is a fresh run.
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar21`). The branch `bitresearch/<tag>` must not already exist.
 2. **Create the branch**: `git checkout -b bitresearch/<tag>` from current master.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
-   - `src/data/dataloader.ts` — fixed data loading, token streaming, batch generation. Do not modify.
-   - `src/distributed/trainer.ts` — the file you modify. Training loop, optimizer, gradient compression, all-reduce.
+   - `src/data/dataloader.ts` — data loading, best-fit packing, BPB evaluation. Do not modify.
+   - `src/distributed/trainer.ts` — training loop, optimizer, gradient compression, all-reduce. You modify this.
    - `src/model/gpt.ts` — model architecture, forward pass, loss. You modify this for architecture changes.
-   - `src/model/config.ts` — model hyperparameters (nLayer, nHead, nEmbd, vocabSize, sequenceLen).
-4. **Verify data exists**: Check that `public/data/` contains tokenized data shards. If not, tell the human to run the data preparation script.
+   - `src/model/config.ts` — model hyperparameters (nLayer, nHead, nKvHead, nEmbd, vocabSize, sequenceLen).
+   - `src/train/muon.ts` — MuonAdamW optimizer. You can tune coefficients here.
+4. **Prepare data**: Run `python scripts/prepare_bitstamp.py` to process the bitstamp OHLCV data into tokenized format. This creates `public/data/tokens.bin` and `public/data/tokens_meta.json`.
 5. **Start the servers**: Run `pnpm run dev:p2p` to launch the signaling server and Vite dev server.
 6. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 7. **Open browser tabs**: Navigate to `http://localhost:5173/p2p.html` in multiple tabs. Each tab is an autonomous training node connected via WebRTC.
 8. **Confirm and go**: Confirm setup looks good.
 
-Once you get confirmation, kick off the experimentation.
+## Data Preparation
 
-## Experimentation
+The bitstamp data is prepared using `scripts/prepare_bitstamp.py`:
 
-Each experiment runs across a swarm of browser tabs. The training loop runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply by clicking "Start Training" on each browser tab.
+```bash
+# Full dataset (~6.8M records)
+python scripts/prepare_bitstamp.py
 
-**What you CAN do:**
-- Modify `src/distributed/trainer.ts` and `src/model/gpt.ts` — these are the only files you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, gradient compression, loss scaling, sparsification.
+# Sample for testing (500K rows)
+python scripts/prepare_bitstamp.py --sample 500000
+```
 
-**What you CANNOT do:**
-- Modify `src/data/dataloader.ts`. It is read-only. It contains the fixed data loading and batch generation.
-- Install new packages or add dependencies. You can only use what's already in `package.json`.
-- Break the WebRTC protocol format (gradient chunk header: `[type(1) | phase(1) | chunkIndex(u32) | stepId(u32) | data(f16[])]`).
-- Remove the f16 gradient compression — raw f32 payloads are too large for WebRTC data channels.
+This script:
+1. Loads Bitstamp BTC/USD 1-minute OHLCV data from `/home/gsai/bitstamp-btcusd-minute-data/data/historical/`
+2. Computes technical indicators (RSI, MACD, Bollinger Bands, ATR, volume ratios)
+3. Discretizes features into token vocabulary (hash-based, vocab_size=8192)
+4. Generates buy/sell/hold signals based on future returns (0.2% threshold, 5-min lookahead)
+5. Saves interleaved `[token, signal, token, signal, ...]` as binary Int32Array
 
-**The goal is simple: get the lowest val_loss.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
+## What You CAN Modify
+- `src/distributed/trainer.ts` — training loop, optimizer config, schedules, batch size, gradient compression
+- `src/model/gpt.ts` — model architecture, activation functions, normalization
+- `src/model/config.ts` — hyperparameters (nLayer, nHead, nKvHead, nEmbd, sequenceLen, windowPattern)
+- `src/train/muon.ts` — MuonAdamW coefficients (Polar Express, momentum, LR)
 
-**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_loss gains, but it should not blow up dramatically.
+## What You CANNOT Modify
+- `src/data/dataloader.ts` — fixed data loading and evaluation. Read-only.
+- Install new packages. Only use what's in `package.json`.
+- Break the WebRTC protocol format.
+- Remove f16 gradient compression.
 
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_loss improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_loss improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
+## Model Architecture (Karpathy's autoresearch parity)
 
-**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
+The model now has **exact feature parity** with Karpathy's autoresearch:
 
-## Output format
+- **Rotary Embeddings**: Precomputed cos/sin tables, exact formula: `y1 = x1*cos + x2*sin`, `y2 = x1*(-sin) + x2*cos`
+- **GQA (Grouped Query Attention)**: Separate n_kv_head for K/V sharing
+- **Value Embeddings (ResFormer)**: Alternating layers get value embeddings with input-dependent sigmoid gating
+- **Residual Lambdas**: `x = resid_lambdas[i] * x + x0_lambdas[i] * x0`
+- **MLP ReLU²**: `relu(x).square()` activation (Karpathy's choice)
+- **Softcap Logits**: `15 * tanh(logits / 15)` to prevent logit explosion
+- **RMSNorm**: Pre-norm architecture
+- **Sliding Window Attention**: Window pattern (e.g. "SSSL") with per-layer window sizes
+- **Exact Weight Init**: Karpathy's uniform `3^0.5 * n_embd^-0.5`, zero projections, std=0.001 lm_head
 
-Once the script finishes it prints a summary like this:
+## Optimizer (MuonAdamW parity)
+
+The optimizer now has **exact feature parity** with Karpathy's MuonAdamW:
+
+- **Muon for matrix params**: Polar Express Newton-Schulz orthogonalization (5 iterations), NorMuon variance reduction, cautious weight decay (only where `grad*param >= 0`)
+- **AdamW for scalars/embeddings**: Separate LR groups for lm_head, wte, value_embeddings, residLambdas, x0Lambdas
+- **`dmodel_lr_scale`**: LRs auto-scaled by `(model_dim / 768)^-0.5` for dimension-independent tuning
+- **Nesterov momentum**: Ramps from 0.85 → 0.95 over 300 steps
+- **Weight decay schedule**: Decays to 0 over training duration
+- **LR schedule**: Warmup → steady → warmdown (configurable ratios)
+
+## Evaluation
+
+The metric is **val_bpb** (validation bits per byte) — vocab-size-independent, comparable across architecture changes.
+
+At training end, `evaluate_bpb` runs automatically:
+- Sums per-token cross-entropy (in nats)
+- Sums target byte lengths
+- Converts nats/byte → bits/byte
+- Special tokens (byte length 0) excluded
+
+## The Experiment Loop
+
+Each experiment runs on a dedicated branch (e.g. `bitresearch/mar21`).
+
+**LOOP FOREVER:**
+
+1. Look at git state: current branch/commit
+2. Tune `src/distributed/trainer.ts` and/or `src/model/gpt.ts` with an experimental idea
+3. `git commit`
+4. Run experiment: `pnpm run dev:p2p`, open browser tabs, click "Start Training", wait 5 minutes
+5. Read results: `grep "^val_bpb:" run.log`
+6. If empty → crash. Run `tail -n 50 run.log` for stack trace.
+7. Log results to `results.tsv` (tab-separated, don't commit)
+8. If val_bpb improved (lower) → advance branch (keep commit)
+9. If val_bpb equal/worse → `git reset` back
+
+**Timeout**: Each experiment ~5 min total. If >10 min, kill and discard.
+
+**Crashes**: Fix easy bugs (typos, missing imports). Skip fundamentally broken ideas.
+
+**NEVER STOP**: The human might be asleep. Continue working indefinitely until manually stopped.
+
+## Output Format
 
 ```
 ---
-val_loss:         3.214567
+val_bpb:          0.997900
 training_seconds: 300.1
 total_seconds:    325.9
-tokens_per_sec:   1523
-total_tokens_M:   45.6
-num_steps:        1204
-num_params_M:     4.2
-depth:            4
-peers:            3
-all_reduce_ms:    127.3
-grad_norm:        1.2345
+peak_vram_mb:     4506.2
+mfu_percent:      39.80
+total_tokens_M:   499.6
+num_steps:        953
+num_params_M:     50.3
+depth:            8
 ```
 
-Note that the script is configured to always stop after 5 minutes, so depending on the computing platform and number of browser tabs the numbers might look different. You can extract the key metric from the log file:
+## Logging Results
+
+`results.tsv` format (tab-separated, 5 columns):
 
 ```
-grep "^val_loss:" run.log
-```
-
-## Logging results
-
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
-
-The TSV has a header row and 5 columns:
-
-```
-commit	val_loss	memory_gb	status	description
-```
-
-1. git commit hash (short, 7 chars)
-2. val_loss achieved (e.g. 3.214567) — use 0.000000 for crashes
-3. peak memory in GB, round to .1f (e.g. 0.4 — divide browser peak bytes by 1073741824) — use 0.0 for crashes
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
-
-Example:
-
-```
-commit	val_loss	memory_gb	status	description
-a1b2c3d	3.214567	0.4	keep	baseline
-b2c3d4e	3.189234	0.4	keep	increase LR to 0.003
-c3d4e5f	3.301000	0.4	discard	switch to GeLU activation
+commit	val_bpb	memory_gb	status	description
+a1b2c3d	0.997900	4.4	keep	baseline
+b2c3d4e	0.993200	4.4	keep	increase LR to 0.04
+c3d4e5f	1.005000	4.4	discard	switch to GeLU activation
 d4e5f6g	0.000000	0.0	crash	double model width (OOM)
 ```
 
-## The experiment loop
+## Ideas to Try
 
-The experiment runs on a dedicated branch (e.g. `bitresearch/mar5` or `bitresearch/mar5-gpu0`).
+Based on Karpathy's autoresearch findings and the trading signal domain:
 
-LOOP FOREVER:
-
-1. Look at the git state: the current branch/commit we're on
-2. Tune `src/distributed/trainer.ts` and/or `src/model/gpt.ts` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: open browser tabs at `http://localhost:5173/p2p.html`, click "Start Training", wait 5 minutes, capture the console output to `run.log`
-5. Read out the results: `grep "^val_loss:\|^tokens_per_sec:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If val_loss improved (lower), you "advance" the branch, keeping the git commit
-9. If val_loss is equal or worse, you git reset back to where you started
-
-The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
-
-**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
-
-**Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
-
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
-
-As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+1. **Model depth**: Start with DEPTH=4 (baseline), try DEPTH=6, 8
+2. **Window pattern**: Try "SSSL" (alternating short/long) vs "L" (full attention)
+3. **Sequence length**: Longer context may capture multi-hour trends
+4. **Vocab size**: Smaller vocab (4096) may generalize better on structured data
+5. **Learning rates**: Karpathy found embedding_lr=0.6 works well; try scaling
+6. **Weight decay**: 0.2 is Karpathy's default; try 0.0 (no decay) for comparison
+7. **Head dimension**: Karpathy uses 128; try 64 for smaller models
+8. **Signal generation**: Modify `prepare_bitstamp.py` to use different thresholds/lookahead
+9. **Feature engineering**: Add more indicators (OBV, Ichimoku, VWAP) to prepare step
+10. **Window sizes**: Wider windows may capture longer market cycles
