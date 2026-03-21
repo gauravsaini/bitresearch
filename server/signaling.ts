@@ -13,6 +13,7 @@ interface RegisteredPeer {
   joinedAt: number;
   ringPosition: number;
   room: string;             // room/session ID for isolated swarms
+  peerType: 'compute' | 'observer';  // compute peers participate in ring, observers just watch
 }
 
 const PORT = parseInt(process.env.SIGNALING_PORT || '8788');
@@ -72,11 +73,18 @@ function getRoom(roomId: string): Map<string, RegisteredPeer> {
 const ringFormTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function formRing(roomId: string): void {
-  const peers = getRoom(roomId);
-  const peerList = Array.from(peers.values()).sort((a, b) => a.id.localeCompare(b.id));
+  const allPeers = getRoom(roomId);
+  // Only compute peers participate in the ring — observers just watch
+  const peerList = Array.from(allPeers.values())
+    .filter(p => p.peerType === 'compute')
+    .sort((a, b) => a.id.localeCompare(b.id));
 
   if (peerList.length < MIN_PEERS_FOR_RING) {
-    log(`⏳ Room ${roomId}: ${peerList.length} peers, need ${MIN_PEERS_FOR_RING} for ring`);
+    log(`⏳ Room ${roomId}: ${peerList.length} compute peers (of ${allPeers.size} total), need ${MIN_PEERS_FOR_RING} for ring`);
+    // Notify all peers that ring is not formed yet
+    for (const peer of allPeers.values()) {
+      sendToPeer(peer.ws, { type: 'ring-waiting', computePeers: peerList.length, totalPeers: allPeers.size });
+    }
     return;
   }
 
@@ -123,9 +131,11 @@ const server = http.createServer((req, res) => {
 
   if (req.url === '/status') {
     const allPeers: any[] = [];
+    let computeCount = 0;
     for (const [roomId, peers] of rooms) {
       for (const p of peers.values()) {
-        allPeers.push({ id: p.id, room: roomId, position: p.ringPosition, joinedAt: p.joinedAt });
+        allPeers.push({ id: p.id, room: roomId, position: p.ringPosition, peerType: p.peerType, joinedAt: p.joinedAt });
+        if (p.peerType === 'compute') computeCount++;
       }
     }
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -134,6 +144,8 @@ const server = http.createServer((req, res) => {
       peers: allPeers,
       ringVersion,
       totalPeers: allPeers.length,
+      computePeers: computeCount,
+      observerPeers: allPeers.length - computeCount,
     }));
   } else if (req.url?.startsWith('/turn-credentials')) {
     // REST endpoint for managed TURN credential rotation
@@ -144,9 +156,14 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify(creds));
   } else {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    let totalPeers = 0;
-    for (const peers of rooms.values()) totalPeers += peers.size;
-    res.end(`WebRTC Signaling Server | ${totalPeers} peers | ${rooms.size} rooms | ring v${ringVersion}`);
+    let totalPeers = 0, computePeers = 0;
+    for (const peers of rooms.values()) {
+      for (const p of peers.values()) {
+        totalPeers++;
+        if (p.peerType === 'compute') computePeers++;
+      }
+    }
+    res.end(`WebRTC Signaling Server | ${computePeers} compute + ${totalPeers - computePeers} observer | ${rooms.size} rooms | ring v${ringVersion}`);
   }
 });
 
@@ -164,6 +181,7 @@ wss.on('connection', (ws: WebSocket) => {
         case 'register': {
           peerId = msg.peerId;
           roomId = msg.room || 'default';
+          const peerType: 'compute' | 'observer' = msg.peerType === 'observer' ? 'observer' : 'compute';
           const peers = getRoom(roomId);
 
           peers.set(peerId!, {
@@ -172,8 +190,11 @@ wss.on('connection', (ws: WebSocket) => {
             joinedAt: Date.now(),
             ringPosition: -1,
             room: roomId,
+            peerType,
           });
-          log(`✅ Peer registered: ${peerId!.slice(-8)} in room ${roomId} (${peers.size} total)`);
+
+          const computeCount = Array.from(peers.values()).filter(p => p.peerType === 'compute').length;
+          log(`✅ Peer registered: ${peerId!.slice(-8)} [${peerType}] in room ${roomId} (${computeCount} compute, ${peers.size} total)`);
 
           // Reform ring with new peer (debounced per room)
           clearTimeout(ringFormTimers.get(roomId));
@@ -207,8 +228,10 @@ wss.on('connection', (ws: WebSocket) => {
     if (peerId) {
       const peers = getRoom(roomId);
       if (peers.has(peerId)) {
+        const leavingPeer = peers.get(peerId)!;
+        const wasCompute = leavingPeer.peerType === 'compute';
         peers.delete(peerId);
-        log(`👋 Peer left: ${peerId.slice(-8)} from room ${roomId} (${peers.size} remaining)`);
+        log(`👋 Peer left: ${peerId.slice(-8)} [${leavingPeer.peerType}] from room ${roomId} (${peers.size} remaining)${wasCompute ? ' — ring will reform' : ''}`);
 
         // Notify others in the same room
         for (const peer of peers.values()) {
