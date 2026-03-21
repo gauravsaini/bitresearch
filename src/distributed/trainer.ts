@@ -13,12 +13,6 @@ import { MuonAdamWOptimizer, createMuonAdamW } from '../train/muon';
 export interface TrainerConfig {
   modelConfig: GPTConfig;
   batchSize: number;
-<<<<<<< HEAD
-  learningRate: number;
-  warmupSteps: number;
-  warmdownFraction?: number;
-  finalLrFrac?: number;
-=======
   // MuonAdamW hyperparameters
   unembedding_lr: number;
   embedding_lr: number;
@@ -31,13 +25,11 @@ export interface TrainerConfig {
   warmdownRatio: number;     // fraction of time budget for LR warmdown
   finalLrFrac: number;       // final LR as fraction of initial
   // Training
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
   maxSteps: number;
   timeBudget: number;        // seconds (default 300 = 5 min)
   gradAccumSteps: number;    // total batch = batchSize * seqLen * gradAccumSteps
   // Distributed
   signalingUrl: string;
-<<<<<<< HEAD
   minRingSize: number;      // pause training if connected peers < this
   checkpointInterval: number; // save checkpoint every N steps (0 = disabled)
   dataUrl: string;           // URL to fetch tokenized data (empty = synthetic)
@@ -49,13 +41,8 @@ export interface TrainerConfig {
   documentsAreBOSPrefixed?: boolean;
   bosTokenId?: number;
   tokenBytesUrl?: string;    // optional URL for token byte lengths (enables exact BPB)
-=======
-  minRingSize: number;
-  checkpointInterval: number;
-  dataUrl: string;
   // Eval
   evalTokens: number;        // tokens for BPB evaluation
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
 }
 
 export interface TrainerMetrics {
@@ -78,11 +65,6 @@ export interface TrainerMetrics {
 const DEFAULT_TRAINER_CONFIG: TrainerConfig = {
   modelConfig: DEFAULT_CONFIG,
   batchSize: 4,
-<<<<<<< HEAD
-  learningRate: 0.001,
-  warmupSteps: 10,
-  warmdownFraction: 0.5,
-=======
   unembedding_lr: 0.004,
   embedding_lr: 0.6,
   matrix_lr: 0.04,
@@ -91,7 +73,6 @@ const DEFAULT_TRAINER_CONFIG: TrainerConfig = {
   adam_betas: [0.8, 0.95],
   warmupRatio: 0.0,
   warmdownRatio: 0.5,
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
   finalLrFrac: 0.0,
   maxSteps: Infinity,
   timeBudget: 300, // 5 minutes
@@ -100,7 +81,6 @@ const DEFAULT_TRAINER_CONFIG: TrainerConfig = {
   minRingSize: 1,
   checkpointInterval: 0,
   dataUrl: '/data/tokens.bin',
-<<<<<<< HEAD
   artifactBaseUrl: '',
   manifestUrl: '',
   documentsUrl: '',
@@ -109,7 +89,11 @@ const DEFAULT_TRAINER_CONFIG: TrainerConfig = {
   documentsAreBOSPrefixed: false,
   bosTokenId: DEFAULT_CONFIG.vocabSize,
   tokenBytesUrl: '',
+  evalTokens: 40 * 524288, // ~20M tokens for eval (matches Karpathy)
 };
+
+// H100 BF16 peak FLOPs (for MFU calculation)
+const H100_BF16_PEAK_FLOPS = 989.5e12;
 
 interface ParityArtifactManifest {
   parityUrl?: string;
@@ -124,13 +108,6 @@ interface ParityArtifactManifest {
     tokenizerDir?: string;
   };
 }
-=======
-  evalTokens: 40 * 524288, // ~20M tokens for eval (matches Karpathy)
-};
-
-// H100 BF16 peak FLOPs (for MFU calculation)
-const H100_BF16_PEAK_FLOPS = 989.5e12;
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
 
 export class DistributedTrainer {
   config: TrainerConfig;
@@ -144,12 +121,9 @@ export class DistributedTrainer {
   private parityManifest: ParityArtifactManifest | null = null;
   private running = false;
   private startTime = 0;
-<<<<<<< HEAD
   valBpb: number = 0;
-=======
   private totalTrainingTime = 0;
   private numFlopsPerToken = 0;
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
 
   metrics: TrainerMetrics = {
     step: 0,
@@ -649,17 +623,8 @@ export class DistributedTrainer {
       await this.loadTrainingDataFromCandidates();
     }
 
-<<<<<<< HEAD
     await this.loadTokenBytesTable();
 
-    // Initialize optimizer
-    this.optimizer = tf.train.adam(
-      this.config.learningRate,
-      0.8,
-      0.95,
-      1e-10,
-    );
-=======
     // Initialize MuonAdamW optimizer
     this.log('🔧 Initializing MuonAdamW optimizer...');
     this.optimizer = createMuonAdamW(this.model, {
@@ -671,7 +636,6 @@ export class DistributedTrainer {
       adam_betas: this.config.adam_betas,
       model_dim: this.config.modelConfig.nEmbd,
     });
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
 
     // Connect to WebRTC signaling
     this.log('🌐 Connecting to signaling server...');
@@ -731,39 +695,9 @@ export class DistributedTrainer {
     return { inputIds, targets };
   }
 
-<<<<<<< HEAD
-  private getScheduleTotalSteps(): number | null {
-    return Number.isFinite(this.config.maxSteps) ? Math.max(0, Math.floor(this.config.maxSteps)) : null;
-  }
-
-  private getLearningRate(step: number): number {
-    const baseLr = this.config.learningRate;
-    const warmupSteps = Math.max(0, Math.floor(this.config.warmupSteps));
-    const totalSteps = this.getScheduleTotalSteps();
-    const warmdownFraction = Math.max(0, Math.min(1, this.config.warmdownFraction ?? 0.5));
-    const finalFrac = Math.max(0, Math.min(1, this.config.finalLrFrac ?? 0));
-
-    if (warmupSteps > 0 && step < warmupSteps) {
-      return baseLr * (step + 1) / warmupSteps;
-    }
-
-    if (totalSteps !== null && warmdownFraction > 0) {
-      const warmdownSteps = Math.max(1, Math.floor(totalSteps * warmdownFraction));
-      const warmdownStart = Math.max(warmupSteps, totalSteps - warmdownSteps);
-      if (step >= warmdownStart) {
-        const progress = Math.min(1, Math.max(0, (step - warmdownStart + 1) / warmdownSteps));
-        const multiplier = 1 - progress * (1 - finalFrac);
-        return baseLr * multiplier;
-      }
-    }
-
-    return baseLr;
-  }
-=======
   // ---------------------------------------------------------------------------
   // Training Step
   // ---------------------------------------------------------------------------
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
 
   private residualBuffer: Float32Array | null = null;
   private sparsificationRatio = 0.10;
@@ -802,11 +736,8 @@ export class DistributedTrainer {
     const B = this.config.batchSize;
     const T = this.config.modelConfig.sequenceLen;
     const step = this.metrics.step;
-<<<<<<< HEAD
     const stepStart = performance.now();
-=======
     const progress = Math.min(this.totalTrainingTime / this.config.timeBudget, 1.0);
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
 
     // 1. Generate Batch
     const { inputIds, targets } = this.generateBatch();
@@ -898,14 +829,10 @@ export class DistributedTrainer {
       allReduceTimeMs = performance.now() - arStart;
 
       if (averagedGradients === null) {
-<<<<<<< HEAD
         // All-reduce was aborted (peer failure mid-step)
         this.log(`⚠️ All-reduce aborted at step ${step}, skipping optimizer update`);
         // Dispose tensors
         for (const v of vars) { gradMap[v.name]?.dispose(); }
-=======
-        this.log(`⚠️ All-reduce aborted at step ${step}, skipping`);
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
         scaledLossTensor.dispose();
         inputTensor.dispose();
         targetTensor.dispose();
@@ -970,7 +897,6 @@ export class DistributedTrainer {
     return loss;
   }
 
-<<<<<<< HEAD
   /**
    * Evaluate validation bits per byte (BPB).
    * Runs forward-only passes on held-out validation tokens and computes byte-weighted
@@ -989,7 +915,6 @@ export class DistributedTrainer {
     const totalTokens = this.valTokens.length;
     if (tokensPerBatch <= 0 || totalTokens <= 1) return 0;
 
-    const vocabSize = this.config.modelConfig.vocabSize;
     const hasExactTokenBytes = this.tokenBytesTensor !== null;
     const tokenBytesTensor = this.tokenBytesTensor;
     let totalNats = 0;
@@ -1059,11 +984,6 @@ export class DistributedTrainer {
     }
     return this.valBpb;
   }
-=======
-  // ---------------------------------------------------------------------------
-  // Training Loop
-  // ---------------------------------------------------------------------------
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
 
   async startTraining(): Promise<void> {
     if (!this.model) await this.initialize();
@@ -1305,12 +1225,8 @@ export class DistributedTrainer {
     const varsByName = this.model.getTrainableVariablesByName();
     let restoredWeights = 0;
 
-<<<<<<< HEAD
     // Restore model weights
     for (const [varName, varObj] of Object.entries(varsByName) as Array<[string, tf.Variable]>) {
-=======
-    for (const [varName, varObj] of Object.entries(varsByName)) {
->>>>>>> 1c1436f (feat: Karpathy autoresearch feature parity — MuonAdamW, Value Embeddings, BPB eval)
       const entry = header[varName];
       if (!entry) {
         this.log(`⚠️ No checkpoint data for weight: ${varName}`);
