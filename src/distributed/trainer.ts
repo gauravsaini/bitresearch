@@ -937,7 +937,7 @@ export class DistributedTrainer {
         const tokenIndices = tf.range(0, safeTargets.size, 1, 'int32');
         const gatherIndices = tf.stack([tokenIndices, safeTargets], 1);
         const logProbs = tf.logSoftmax(logits, -1);
-        const perTokenNats = tf.neg(tf.gatherND(logProbs, gatherIndices));
+        const perTokenNats = tf.neg(tf.gatherND((logProbs, gatherIndices));
         const validMaskF = tf.cast(validMask, 'float32');
 
         if (hasExactTokenBytes && tokenBytesTensor) {
