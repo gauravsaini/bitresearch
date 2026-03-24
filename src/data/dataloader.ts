@@ -261,7 +261,7 @@ export class TokenDataLoader {
     const splitIdx = Math.floor(this.tokens.length * (1 - ratio));
     const valTokens = this.tokens.slice(splitIdx);
     // Trim training cursor to train-only range
-    this.tokens = this.tokens.subarray(0, splitIdx);
+    this.tokens = this.tokens.slice(0, splitIdx);
     this.pos = 0;
     return valTokens;
   }

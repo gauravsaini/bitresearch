@@ -904,7 +904,7 @@ export class DistributedTrainer {
    * evaluate_bpb() semantics exactly: sum nats, sum bytes, then convert nats/byte to bits/byte.
    * Otherwise it falls back to the legacy avgBytesPerToken approximation.
    */
-  async evaluateBpb(batchSize?: number, numBatches = 10, avgBytesPerToken = 1.0): Promise<number> {
+  async evaluateBpb(batchSize?: number, numBatches = 10, avgBytesPerToken = 0): Promise<number> {
     if (!this.model || !this.valTokens || this.valTokens.length === 0) {
       return 0;
     }
