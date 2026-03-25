@@ -47,10 +47,10 @@
 ### Next High-Value Gaps
 
 - [ ] Decide whether browser training should stay stream-based on concatenated shard bins or grow a manifest-driven document mode for exact document-boundary splits at runtime.
-- [ ] Top-k sparsification with error feedback for gradient compression
+- [x] Top-k sparsification with error feedback for gradient compression
 - [ ] Add profile-guided memory checks for larger parity corpora in real browser sessions
 - [ ] Expose artifact/reference health directly in the UI
-- [ ] Add `results.tsv` experiment logging
+- [x] Add `results.tsv` experiment logging (auto-logs after each training run)
 
 ### Constraints
 
@@ -139,7 +139,7 @@
 | **`prepare.py`** | Downloads data, trains BPE, saves shards | ✅ Ported | 🟢 `scripts/prepare.py` |
 | **`train.py`** | Single-file training | ✅ Split across files | 🟢 Already structured |
 | **`program.md`** | Agent instructions | ✅ Implemented | 🟢 Already done |
-| **`results.tsv`** | Experiment logging | ❌ Missing | 🟢 File I/O |
+| **`results.tsv`** | Experiment logging | ❌ Ported | 🟢 File I/O |
 | **PyTorch reference** | `train_reference.py` | ✅ Ported | 🟢 `scripts/train_reference.py` |
 
 ---
@@ -159,11 +159,11 @@
 ### Priority 3: Compression and Efficiency
 - [x] Baseline f16 transport
 - [x] Dynamic loss scaling
-- [ ] Top-k sparsification with error feedback
+- [x] Top-k sparsification with error feedback (GradientSparsifier module)
 - [ ] Better browser memory instrumentation
 
 ### Priority 4: Usability
 - [x] Headless launcher
 - [x] Checkpoint save/load
 - [ ] Expose artifact/reference health in UI
-- [ ] `results.tsv` experiment logging
+- [ ] `results.tsv` experiment logging (auto-logs after each training run)

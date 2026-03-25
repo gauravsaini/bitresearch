@@ -9,6 +9,7 @@ import { WebRTCMesh } from './webrtc-mesh';
 import { RingAllReduce } from './ring-allreduce';
 import { TokenDataLoader, evaluateBPB } from '../data/dataloader';
 import { MuonAdamWOptimizer, createMuonAdamW } from '../train/muon';
+import { GradientSparsifier, type SparseGradient, type SparsificationConfig } from "./gradient-sparsifier";
 
 export interface TrainerConfig {
   modelConfig: GPTConfig;
@@ -43,6 +44,9 @@ export interface TrainerConfig {
   tokenBytesUrl?: string;    // optional URL for token byte lengths (enables exact BPB)
   // Eval
   evalTokens: number;        // tokens for BPB evaluation
+  // Gradient sparsification
+  sparsification?: Partial<SparsificationConfig>;
+  enableSparsification?: boolean;
 }
 
 export interface TrainerMetrics {
@@ -90,6 +94,8 @@ const DEFAULT_TRAINER_CONFIG: TrainerConfig = {
   bosTokenId: DEFAULT_CONFIG.vocabSize,
   tokenBytesUrl: '',
   evalTokens: 40 * 524288, // ~20M tokens for eval (matches Karpathy)
+  enableSparsification: false,
+  sparsification: { topKRatio: 0.10, warmupSteps: 100, sampleSize: 10000, momentumFactor: 0.9 },
 };
 
 // H100 BF16 peak FLOPs (for MFU calculation)
@@ -699,34 +705,18 @@ export class DistributedTrainer {
   // Training Step
   // ---------------------------------------------------------------------------
 
-  private residualBuffer: Float32Array | null = null;
-  private sparsificationRatio = 0.10;
+  private gradientSparsifier: GradientSparsifier | null = null;
+  
 
   private applyTopKSparsification(grad: Float32Array): void {
-    const N = grad.length;
-    if (!this.residualBuffer || this.residualBuffer.length !== N) {
-      this.residualBuffer = new Float32Array(N);
+    if (!this.gradientSparsifier) {
+      this.gradientSparsifier = new GradientSparsifier(this.config.sparsification);
     }
-
-    for (let i = 0; i < N; i++) {
-      grad[i] += this.residualBuffer[i];
-    }
-
-    const sampleSize = Math.min(N, 10000);
-    const samples = new Float32Array(sampleSize);
-    for (let i = 0; i < sampleSize; i++) {
-      samples[i] = Math.abs(grad[Math.floor(Math.random() * N)]);
-    }
-    samples.sort();
-    const threshold = samples[Math.floor(sampleSize * (1.0 - this.sparsificationRatio))];
-
-    for (let i = 0; i < N; i++) {
-      if (Math.abs(grad[i]) < threshold) {
-        this.residualBuffer[i] = grad[i];
-        grad[i] = 0.0;
-      } else {
-        this.residualBuffer[i] = 0.0;
-      }
+    // Sparsify in-place (zeroes non-top-K values, stores residuals internally)
+    const sparse = this.gradientSparsifier.sparsify(grad);
+    const ratio = GradientSparsifier.compressionRatio(sparse);
+    if (this.metrics.step % 50 === 0) {
+      this.log(`📦 Gradient sparsification: ${sparse.indices.length}/${sparse.length} values kept (${(ratio * 100).toFixed(1)}% of dense)`);
     }
   }
 
@@ -1076,6 +1066,31 @@ export class DistributedTrainer {
     this.log(`num_steps:        ${this.metrics.step}`);
     this.log(`num_params_M:     ${this.metrics.numParamsM.toFixed(1)}`);
     this.log(`depth:            ${this.config.modelConfig.nLayer}`);
+
+
+    // ── Auto-log results to results.tsv ──
+    if (typeof (globalThis as any).process !== 'undefined') {
+      try {
+        const { ResultsLogger } = await import('../train/results-logger');
+        const logger = new ResultsLogger();
+        logger.log({
+          valBpb: this.metrics.valBpb,
+          peakMemoryMb: peakVramMb,
+          status: this.metrics.valBpb > 0 ? 'keep' : 'crash',
+          description: `step ${this.metrics.step} | ${this.metrics.numParamsM.toFixed(1)}M params | depth=${this.config.modelConfig.nLayer}`,
+          trainingSeconds: this.totalTrainingTime,
+          totalSeconds: totalSeconds,
+          mfuPercent: this.metrics.mfuPercent,
+          totalTokensM: this.metrics.totalTokens / 1e6,
+          numSteps: this.metrics.step,
+          numParamsM: this.metrics.numParamsM,
+          depth: this.config.modelConfig.nLayer,
+        });
+        this.log('📝 Results logged to results.tsv');
+      } catch (e) {
+        this.log(`⚠️ Could not log results to results.tsv: ${e}`);
+      }
+    }
 
     this.log('🏁 Training complete!');
   }
